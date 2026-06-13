@@ -1,0 +1,49 @@
+[project]
+name = "graph-agent"
+version = "0.1.0"
+description = "Graph agent package."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "GPL-3.0-only"
+dependencies = [
+    "openai>=1.66.0",
+]
+
+[tool.uv.workspace]
+members = ["packages/graph-agent-viewer"]
+
+[tool.uv.sources]
+graph-agent = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18.2",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12"]
+build-backend = "uv_build"
+
+[tool.mypy]
+python_version = "3.12"
+files = [
+    "src",
+    "tests",
+    "example",
+    "packages/graph-agent-viewer/src",
+    "packages/graph-agent-viewer/tests",
+]
+mypy_path = [
+    "src",
+    "packages/graph-agent-viewer/src",
+]
+show_error_codes = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = "graph_agent.*"
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = "graph_agent_viewer.*"
+check_untyped_defs = true

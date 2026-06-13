@@ -1,0 +1,15 @@
+[project]
+name = "graph-agent-viewer"
+version = "0.1.0"
+description = "Viewer and visualization helpers for graph-agent graphs."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "GPL-3.0-only"
+dependencies = [
+    "aiohttp>=3.10.0",
+    "graph-agent>=0.1.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12"]
+build-backend = "uv_build"
