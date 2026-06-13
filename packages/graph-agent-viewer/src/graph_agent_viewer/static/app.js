@@ -50,17 +50,17 @@
         grouped[level].push(node);
       }
       const positions = {};
-      const columnWidth = 138;
-      const rowHeight = 72;
+      const columnWidth = 198;
+      const rowHeight = 64;
       for (const [levelText, group] of Object.entries(grouped)) {
         const level = Number(levelText);
         group.sort((a, b) => a.id.localeCompare(b.id));
         group.forEach((node, index) => {
           positions[node.id] = {
             x: 48 + level * columnWidth,
-            y: 36 + index * rowHeight,
-            width: 86,
-            height: 36,
+            y: 58 + index * rowHeight,
+            width: 68,
+            height: 28,
           };
         });
       }
@@ -70,18 +70,105 @@
         nodes,
         edges: edges.filter((edge) => byId[edge.source] && byId[edge.target]),
         positions,
-        width: 84 + (maxLevel + 1) * columnWidth,
-        height: 70 + maxRows * rowHeight,
+        width: 96 + (maxLevel + 1) * columnWidth,
+        height: 96 + maxRows * rowHeight,
       };
     }
 
     function GraphDiagram({graph, title, edges, statuses, selectedEdgeId, onEdgeClick, emptyText}) {
       const layout = useMemo(() => layoutGraph(graph), [graph]);
       const visibleEdges = edges || layout.edges;
+      const [manualPositions, setManualPositions] = useState({});
+      const [drag, setDrag] = useState(null);
+      const positions = useMemo(() => {
+        const merged = {};
+        for (const [nodeId, pos] of Object.entries(layout.positions)) {
+          const manual = manualPositions[nodeId];
+          merged[nodeId] = manual ? {...pos, x: manual.x, y: manual.y} : pos;
+        }
+        return merged;
+      }, [layout.positions, manualPositions]);
+      function svgPointFor(svg, event) {
+        const point = svg.createSVGPoint();
+        point.x = event.clientX;
+        point.y = event.clientY;
+        return point.matrixTransform(svg.getScreenCTM().inverse());
+      }
+      function onNodePointerDown(event, nodeId) {
+        const pos = positions[nodeId];
+        if (!pos) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.pointerId != null && event.currentTarget.setPointerCapture) {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }
+        const svg = event.currentTarget.ownerSVGElement;
+        const point = svgPointFor(svg, event);
+        setDrag({
+          nodeId,
+          pointerId: event.pointerId == null ? "mouse" : event.pointerId,
+          svg,
+          offsetX: point.x - pos.x,
+          offsetY: point.y - pos.y,
+        });
+      }
+      function updateDraggedNode(event, currentDrag) {
+        const pointerId = event.pointerId == null ? "mouse" : event.pointerId;
+        if (!currentDrag || currentDrag.pointerId !== pointerId) return;
+        const point = svgPointFor(currentDrag.svg, event);
+        const base = layout.positions[currentDrag.nodeId];
+        if (!base) return;
+        const nextX = Math.max(8, Math.min(layout.width - base.width - 8, point.x - currentDrag.offsetX));
+        const nextY = Math.max(8, Math.min(layout.height - base.height - 8, point.y - currentDrag.offsetY));
+        setManualPositions((current) => ({
+          ...current,
+          [currentDrag.nodeId]: {x: nextX, y: nextY},
+        }));
+      }
+      function onNodePointerMove(event) {
+        updateDraggedNode(event, drag);
+      }
+      function onNodePointerUp(event) {
+        const pointerId = event.pointerId == null ? "mouse" : event.pointerId;
+        if (drag && drag.pointerId === pointerId) {
+          setDrag(null);
+        }
+      }
+      useEffect(() => {
+        if (!drag) return undefined;
+        function move(event) {
+          event.preventDefault();
+          updateDraggedNode(event, drag);
+        }
+        function stop() {
+          setDrag(null);
+        }
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", stop);
+        window.addEventListener("mousemove", move);
+        window.addEventListener("mouseup", stop);
+        return () => {
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", stop);
+          window.removeEventListener("mousemove", move);
+          window.removeEventListener("mouseup", stop);
+        };
+      }, [drag, layout.positions, layout.width, layout.height]);
       return h("div", {className: "panel"},
         h("div", {className: "panel-title"}, h("span", null, title), h("span", null, graph.start_node || "")),
         h("div", {className: "graph-canvas"},
-          h("svg", {viewBox: `0 0 ${layout.width} ${layout.height}`, role: "img"},
+          h("svg", {
+            viewBox: `0 0 ${layout.width} ${layout.height}`,
+            width: layout.width,
+            height: layout.height,
+            role: "img",
+            onPointerMove: onNodePointerMove,
+            onPointerUp: onNodePointerUp,
+            onPointerCancel: onNodePointerUp,
+            onMouseMove: onNodePointerMove,
+            onMouseUp: onNodePointerUp,
+            onMouseLeave: onNodePointerUp,
+          },
             h("defs", null,
               h("marker", {id: "arrow", markerWidth: "10", markerHeight: "10", refX: "8", refY: "3", orient: "auto", markerUnits: "strokeWidth"},
                 h("path", {d: "M0,0 L0,6 L9,3 z", fill: "#94a3b8"})
@@ -89,20 +176,22 @@
             ),
             visibleEdges.length === 0 ? h("text", {x: 24, y: 32, className: "edge-label"}, emptyText || "") : null,
             visibleEdges.map((edge) => {
-              const source = layout.positions[edge.source];
-              const target = layout.positions[edge.target];
+              const source = positions[edge.source];
+              const target = positions[edge.target];
               if (!source || !target) return null;
               const x1 = source.x + source.width;
               const y1 = source.y + source.height / 2;
               const x2 = target.x;
               const y2 = target.y + target.height / 2;
               const midX = (x1 + x2) / 2;
+              const midY = (y1 + y2) / 2;
               const selected = selectedEdgeId === edge.id;
               const clickable = Boolean(onEdgeClick);
               const label = edge.name;
-              const labelWidth = Math.min(160, Math.max(46, label.length * 7 + 18));
+              const labelGap = Math.max(46, Math.abs(x2 - x1) - 16);
+              const labelWidth = Math.min(160, labelGap, Math.max(46, label.length * 7 + 18));
               const labelX = midX - labelWidth / 2;
-              const labelY = (y1 + y2) / 2 - 22;
+              const labelY = Math.max(10, midY - 26);
               return h("g", {
                 key: edge.id,
                 className: `${clickable ? "edge-clickable" : ""} ${selected ? "edge-selected" : ""}`,
@@ -115,13 +204,19 @@
               );
             }),
             layout.nodes.map((node) => {
-              const pos = layout.positions[node.id];
+              const pos = positions[node.id];
               const status = (statuses && statuses[node.id]) || "pending";
-              return h("g", {key: node.id, className: `node ${status}`, transform: `translate(${pos.x},${pos.y})`},
+              return h("g", {
+                key: node.id,
+                className: `node ${status} ${drag && drag.nodeId === node.id ? "dragging" : ""}`,
+                transform: `translate(${pos.x},${pos.y})`,
+                onPointerDown: (event) => onNodePointerDown(event, node.id),
+                onMouseDown: (event) => onNodePointerDown(event, node.id),
+              },
                 h("rect", {width: pos.width, height: pos.height}),
-                h("text", {className: "label", x: 8, y: 15}, node.label),
-                h("text", {className: "kind", x: 8, y: 28}, `${node.kind} / ${status}`),
-                node.is_start ? h("text", {className: "badge", x: pos.width - 28, y: 13}, "start") : null
+                h("text", {className: "label", x: 6, y: 12}, node.label),
+                h("text", {className: "kind", x: 6, y: 22}, `${node.kind} / ${status}`),
+                node.is_start ? h("text", {className: "badge", x: pos.width - 24, y: 11}, "start") : null
               );
             })
           )

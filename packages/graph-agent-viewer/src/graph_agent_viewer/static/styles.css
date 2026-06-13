@@ -106,7 +106,7 @@
         linear-gradient(90deg, #eef2f7 1px, transparent 1px);
       background-size: 28px 28px;
     }
-    svg { display: block; min-width: 100%; min-height: 100%; }
+    svg { display: block; }
     .edge-path {
       fill: none;
       stroke: #94a3b8;
@@ -146,22 +146,32 @@
       fill: #ffffff;
       stroke: var(--pending);
       stroke-width: 2;
-      rx: 8;
+      rx: 6;
+    }
+    .node {
+      cursor: grab;
+      touch-action: none;
+    }
+    .node.dragging {
+      cursor: grabbing;
+    }
+    .node.dragging rect {
+      filter: drop-shadow(0 6px 10px rgb(15 23 42 / 0.18));
     }
     .node.running rect { stroke: var(--running); fill: #eff6ff; }
     .node.finished rect { stroke: var(--done); fill: #ecfdf5; }
     .node.error rect { stroke: var(--error); fill: #fef2f2; }
     .node .label {
-      font-size: 10px;
+      font-size: 8px;
       font-weight: 700;
       fill: var(--text);
     }
     .node .kind {
-      font-size: 8px;
+      font-size: 6.5px;
       fill: var(--muted);
     }
     .node .badge {
-      font-size: 8px;
+      font-size: 6.5px;
       fill: var(--amber);
       font-weight: 700;
     }
