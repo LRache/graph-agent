@@ -504,6 +504,134 @@ class GraphRuntimeTests(unittest.TestCase):
         self.assertEqual(events[1].payload["history"], [input_message])
         self.assertEqual(events[2].payload["output"].text(), "start")
 
+    def test_graph_run_event_sink_waits_before_next_round(self):
+        async def scenario():
+            first_gate = asyncio.Event()
+            second_gate = asyncio.Event()
+            releases = [asyncio.Event(), asyncio.Event()]
+            source_started = asyncio.Event()
+            target_started = asyncio.Event()
+            gated_nodes = []
+
+            def source(ctx, history, upstream_outputs):
+                source_started.set()
+                return Message.assistant_text("source")
+
+            def target(ctx, history, upstream_outputs):
+                target_started.set()
+                return Message.assistant_text("target")
+
+            class BlockingSink:
+                waits_for_activation_rounds = True
+
+                async def __call__(self, event):
+                    if event.name != RuntimeEventName.ACTIVATION_READY:
+                        return
+                    gated_nodes.append(event.payload["nodes"])
+                    if len(gated_nodes) == 1:
+                        first_gate.set()
+                    if len(gated_nodes) == 2:
+                        second_gate.set()
+                    await releases[len(gated_nodes) - 1].wait()
+
+            graph = (
+                GraphBuilder("gated_runtime")
+                .node(CallableNode("source", source))
+                .node(CallableNode("target", target))
+                .start("source")
+                .edge("source", "target", name="source_to_target")
+                .build()
+            )
+
+            run_task = asyncio.create_task(graph.run(event_sink=BlockingSink()))
+            await asyncio.wait_for(first_gate.wait(), timeout=1)
+            self.assertEqual(gated_nodes, [["source"]])
+            self.assertFalse(source_started.is_set())
+            self.assertFalse(target_started.is_set())
+
+            releases[0].set()
+            await asyncio.wait_for(second_gate.wait(), timeout=1)
+            self.assertEqual(gated_nodes, [["source"], ["target"]])
+            self.assertTrue(source_started.is_set())
+            self.assertFalse(target_started.is_set())
+
+            releases[1].set()
+            result = await asyncio.wait_for(run_task, timeout=1)
+
+            self.assertTrue(target_started.is_set())
+            self.assertEqual([message.text() for message in result.output], ["target"])
+
+        asyncio.run(scenario())
+
+    def test_graph_run_event_sink_steps_full_rounds(self):
+        async def scenario():
+            gate_calls = []
+            first_gate = asyncio.Event()
+            second_gate = asyncio.Event()
+            third_gate = asyncio.Event()
+            releases = [asyncio.Event(), asyncio.Event(), asyncio.Event()]
+            right_release = asyncio.Event()
+
+            def immediate(name):
+                return lambda ctx, history, upstream_outputs: Message.assistant_text(name)
+
+            class BlockingSink:
+                waits_for_activation_rounds = True
+
+                async def __call__(self, event):
+                    if event.name != RuntimeEventName.ACTIVATION_READY:
+                        return
+                    gate_calls.append(event.payload["nodes"])
+                    if len(gate_calls) == 1:
+                        first_gate.set()
+                    if len(gate_calls) == 2:
+                        second_gate.set()
+                    if len(gate_calls) == 3:
+                        third_gate.set()
+                    await releases[len(gate_calls) - 1].wait()
+
+            class BlockingRight(CallableNode):
+                async def invoke(self, ctx, history, upstream_outputs, **extra):
+                    await right_release.wait()
+                    return await super().invoke(ctx, history, upstream_outputs, **extra)
+
+            graph = (
+                GraphBuilder("gated_rounds")
+                .node(CallableNode("seed", immediate("seed")))
+                .node(CallableNode("left", immediate("left")))
+                .node(BlockingRight("right", immediate("right")))
+                .node(CallableNode("left_child", immediate("left_child")))
+                .node(CallableNode("right_child", immediate("right_child")))
+                .start("seed")
+                .edge("seed", "left", name="seed_to_left")
+                .edge("seed", "right", name="seed_to_right")
+                .edge("left", "left_child", name="left_to_child")
+                .edge("right", "right_child", name="right_to_child")
+                .build()
+            )
+
+            run_task = asyncio.create_task(graph.run(event_sink=BlockingSink()))
+            await asyncio.wait_for(first_gate.wait(), timeout=1)
+            self.assertEqual(gate_calls[0], ["seed"])
+
+            releases[0].set()
+            await asyncio.wait_for(second_gate.wait(), timeout=1)
+            self.assertEqual(set(gate_calls[1]), {"left", "right"})
+
+            releases[1].set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertEqual(len(gate_calls), 2)
+            right_release.set()
+            await asyncio.wait_for(third_gate.wait(), timeout=1)
+            self.assertEqual(set(gate_calls[2]), {"left_child", "right_child"})
+
+            releases[2].set()
+            result = await asyncio.wait_for(run_task, timeout=1)
+            self.assertEqual(len(result.output), 1)
+
+        asyncio.run(scenario())
+
     def test_graph_run_can_only_start_once(self):
         async def scenario():
             started = asyncio.Event()

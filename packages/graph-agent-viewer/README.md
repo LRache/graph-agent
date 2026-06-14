@@ -15,3 +15,6 @@ from graph_agent_viewer import GraphView
 
 GraphView.run(graph)
 ```
+
+Use `GraphView.run(graph, step_mode=True)` to pause before each next activation
+round and advance with the `Next Step` button.

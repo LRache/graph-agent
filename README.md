@@ -141,6 +141,13 @@ from graph_agent_viewer import GraphView
 GraphView.run(graph)
 ```
 
+Enable step mode to pause before each next activation round. Click `Next Step` in
+the viewer to continue:
+
+```python
+GraphView.run(graph, step_mode=True)
+```
+
 There is also a runnable local demo:
 
 ```bash

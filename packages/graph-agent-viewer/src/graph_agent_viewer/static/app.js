@@ -80,6 +80,21 @@
       const visibleEdges = edges || layout.edges;
       const [manualPositions, setManualPositions] = useState({});
       const [drag, setDrag] = useState(null);
+      const edgeLanes = useMemo(() => {
+        const groups = {};
+        visibleEdges.forEach((edge) => {
+          const pair = [edge.source, edge.target].sort().join("\u0000");
+          groups[pair] = groups[pair] || [];
+          groups[pair].push(edge.id);
+        });
+        const lanes = {};
+        for (const ids of Object.values(groups)) {
+          ids.forEach((id, index) => {
+            lanes[id] = index - (ids.length - 1) / 2;
+          });
+        }
+        return lanes;
+      }, [visibleEdges]);
       const positions = useMemo(() => {
         const merged = {};
         for (const [nodeId, pos] of Object.entries(layout.positions)) {
@@ -179,26 +194,39 @@
               const source = positions[edge.source];
               const target = positions[edge.target];
               if (!source || !target) return null;
-              const x1 = source.x + source.width;
+              const sourceCenterX = source.x + source.width / 2;
+              const targetCenterX = target.x + target.width / 2;
+              const backward = sourceCenterX > targetCenterX;
+              const x1 = backward ? source.x : source.x + source.width;
               const y1 = source.y + source.height / 2;
-              const x2 = target.x;
+              const x2 = backward ? target.x + target.width : target.x;
               const y2 = target.y + target.height / 2;
+              const lane = edgeLanes[edge.id] || 0;
+              const bend = lane * 36;
+              const controlOffset = Math.max(42, Math.abs(x2 - x1) / 2);
+              const c1x = backward ? x1 - controlOffset : x1 + controlOffset;
+              const c2x = backward ? x2 + controlOffset : x2 - controlOffset;
+              const c1y = y1 + bend;
+              const c2y = y2 + bend;
+              const edgePath = `M${x1},${y1} C${c1x},${c1y} ${c2x},${c2y} ${x2},${y2}`;
               const midX = (x1 + x2) / 2;
-              const midY = (y1 + y2) / 2;
+              const pathMidY = (y1 + y2) / 2 + bend;
               const selected = selectedEdgeId === edge.id;
               const clickable = Boolean(onEdgeClick);
               const label = edge.name;
               const labelGap = Math.max(46, Math.abs(x2 - x1) - 16);
               const labelWidth = Math.min(160, labelGap, Math.max(46, label.length * 7 + 18));
               const labelX = midX - labelWidth / 2;
-              const labelY = Math.max(10, midY - 26);
+              const labelDirection = lane === 0 ? -1 : Math.sign(lane);
+              const labelCenterY = pathMidY + labelDirection * 34;
+              const labelY = Math.max(10, Math.min(layout.height - 30, labelCenterY - 10));
               return h("g", {
                 key: edge.id,
                 className: `${clickable ? "edge-clickable" : ""} ${selected ? "edge-selected" : ""}`,
                 onClick: clickable ? () => onEdgeClick(edge) : undefined,
               },
-                clickable ? h("path", {className: "edge-hit", d: `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}`}) : null,
-                h("path", {className: "edge-path", markerEnd: "url(#arrow)", d: `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}`}),
+                clickable ? h("path", {className: "edge-hit", d: edgePath}) : null,
+                h("path", {className: "edge-path", markerEnd: "url(#arrow)", d: edgePath}),
                 h("rect", {className: "edge-label-bg", x: labelX, y: labelY, width: labelWidth, height: 20}),
                 h("text", {className: "edge-label", x: midX, y: labelY + 14, textAnchor: "middle"}, label)
               );
@@ -279,6 +307,8 @@
               h("div", {className: "event-body"},
                 event.payload.node ? h("div", {className: "kv"}, h("span", null, "node"), h("div", {className: "value"}, event.payload.node)) : null,
                 event.payload.graph ? h("div", {className: "kv"}, h("span", null, "graph"), h("div", {className: "value"}, event.payload.graph)) : null,
+                event.payload.step != null ? h("div", {className: "kv"}, h("span", null, "step"), h("div", {className: "value"}, String(event.payload.step))) : null,
+                event.payload.nodes ? h("div", {className: "kv"}, h("span", null, "nodes"), h("div", {className: "value"}, event.payload.nodes.join(", "))) : null,
                 event.payload.history ? h("div", {className: "kv"}, h("span", null, "history"), h("div", {className: "value"}, event.payload.history.map(textOf).join("\n"))) : null,
                 event.payload.output ? h("div", {className: "kv"}, h("span", null, "output"), h("div", {className: "value"}, textOf(event.payload.output))) : null,
                 event.payload.message ? h("div", {className: "kv"}, h("span", null, "message"), h("div", {className: "value"}, event.payload.message)) : null
@@ -444,6 +474,8 @@
       const [events, setEvents] = useState([]);
       const [error, setError] = useState(null);
       const [selectedEdge, setSelectedEdge] = useState(null);
+      const [stepStatus, setStepStatus] = useState({enabled: false, waiting: false, step: 0});
+      const [advancingStep, setAdvancingStep] = useState(false);
       useEffect(() => {
         fetch("/api/graph")
           .then((response) => {
@@ -452,15 +484,58 @@
           })
           .then(setGraph)
           .catch((error) => setError(error.message));
+        fetch("/api/step")
+          .then((response) => {
+            if (!response.ok) throw new Error(`Step request failed: ${response.status}`);
+            return response.json();
+          })
+          .then(setStepStatus)
+          .catch(() => {});
         const source = new EventSource("/api/events");
         source.addEventListener("graph-event", (event) => {
-          setEvents((current) => current.concat(JSON.parse(event.data)));
+          const eventData = JSON.parse(event.data);
+          setEvents((current) => current.concat(eventData));
+          if (eventData.name === "viewer_step_waiting") {
+            setStepStatus({
+              enabled: true,
+              waiting: true,
+              step: eventData.payload.step || 0,
+              nodes: eventData.payload.nodes || [],
+              edges: eventData.payload.edges || [],
+            });
+          }
+          if (eventData.name === "viewer_step_released") {
+            setStepStatus((current) => ({
+              ...current,
+              enabled: true,
+              waiting: current.step === eventData.payload.step ? false : current.waiting,
+              step: Math.max(current.step || 0, eventData.payload.step || 0),
+            }));
+          }
+          if (eventData.name === "graph_finished" || eventData.name === "viewer_error") {
+            setStepStatus((current) => ({...current, waiting: false}));
+          }
         });
         source.onerror = () => {
           setError((current) => current || "Runtime event stream disconnected");
         };
         return () => source.close();
       }, []);
+      function advanceStep() {
+        if (!stepStatus.waiting || advancingStep) return;
+        const releasedStep = stepStatus.step;
+        setAdvancingStep(true);
+        setStepStatus((current) => current.step === releasedStep ? {...current, waiting: false} : current);
+        fetch("/api/step", {method: "POST"})
+          .then((response) => {
+            if (!response.ok) throw new Error(`Next step failed: ${response.status}`);
+          })
+          .catch((error) => {
+            setStepStatus((current) => current.step === releasedStep ? {...current, waiting: true} : current);
+            setError(error.message);
+          })
+          .finally(() => setAdvancingStep(false));
+      }
       const stats = useMemo(() => {
         if (!graph) return {nodes: 0, edges: 0, running: 0, finished: 0};
         const statuses = statusByNode(graph, events);
@@ -476,11 +551,23 @@
       return h("div", {className: "shell"},
         h("header", null,
           h("div", null, h("h1", null, graph.name), h("div", {className: "subtitle"}, `start: ${graph.start_node || "none"}`)),
-          h("div", {className: "stats"},
-            h("div", {className: "stat"}, h("strong", null, stats.nodes), "nodes"),
-            h("div", {className: "stat"}, h("strong", null, stats.edges), "edges"),
-            h("div", {className: "stat"}, h("strong", null, stats.running), "running"),
-            h("div", {className: "stat"}, h("strong", null, stats.finished), "finished")
+          h("div", {className: "header-actions"},
+            stepStatus.enabled ? h("div", {className: "step-controls"},
+              h("button", {
+                className: "step-button",
+                type: "button",
+                disabled: !stepStatus.waiting || advancingStep,
+                onClick: advanceStep,
+                title: stepStatus.waiting ? `Release step ${stepStatus.step}` : "Waiting for the next step",
+              }, advancingStep ? "Advancing" : "Next Step"),
+              h("span", {className: `step-state ${stepStatus.waiting ? "waiting" : ""}`}, stepStatus.waiting ? `step ${stepStatus.step}` : "idle")
+            ) : null,
+            h("div", {className: "stats"},
+              h("div", {className: "stat"}, h("strong", null, stats.nodes), "nodes"),
+              h("div", {className: "stat"}, h("strong", null, stats.edges), "edges"),
+              h("div", {className: "stat"}, h("strong", null, stats.running), "running"),
+              h("div", {className: "stat"}, h("strong", null, stats.finished), "finished")
+            )
           )
         ),
         h("main", null,

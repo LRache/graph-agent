@@ -125,13 +125,13 @@ class Graph:
             **dict(extra),
         )
 
-    def _schedule_activation(
+    async def _schedule_activation(
         self,
         ctx: RunContext,
         activation: NodeActivation,
     ) -> asyncio.Task[NodeResult]:
         if activation.activation_edges:
-            ctx.emit(
+            await ctx.emit(
                 RuntimeEventName.NODE_ACTIVATED,
                 node=activation.node.name,
                 target=activation.node.name,
@@ -146,7 +146,7 @@ class Graph:
                 history=list(activation.history),
                 upstream_outputs=dict(activation.upstream_outputs),
             )
-        ctx.emit(
+        await ctx.emit(
             RuntimeEventName.NODE_STARTED,
             node=activation.node.name,
             history=list(activation.history),
@@ -224,7 +224,10 @@ class Graph:
         affected_targets = self._propagate_completed_node(completed_node)
         return self._activate_ready_targets(affected_targets)
 
-    async def run(self, event_sink: EventSink | None = None) -> GraphRunResult:
+    async def run(
+        self,
+        event_sink: EventSink | None = None,
+    ) -> GraphRunResult:
         if self.start_node is None:
             raise KeyError("graph must have a start node")
         if self.start_node not in self.nodes:
@@ -236,8 +239,14 @@ class Graph:
 
         self._has_run = True
         running_tasks: dict[asyncio.Task[NodeResult], NodeActivation] = {}
+        waits_for_activation_rounds = bool(
+            getattr(event_sink, "waits_for_activation_rounds", False)
+        )
+        handles_activation_ready = waits_for_activation_rounds or bool(
+            getattr(event_sink, "handles_activation_ready", False)
+        )
         ctx = RunContext(event_sink=event_sink)
-        ctx.emit(RuntimeEventName.GRAPH_STARTED, graph=self.name)
+        await ctx.emit(RuntimeEventName.GRAPH_STARTED, graph=self.name)
 
         start_history = list(self.input_messages)
         node = self.nodes[self.start_node]
@@ -253,18 +262,27 @@ class Graph:
             downstream_history=list(downstream_history),
         )
 
-        next_task = self._schedule_activation(ctx, activation)
+        if handles_activation_ready:
+            await self._emit_activation_ready(ctx, [activation])
+
+        next_task = await self._schedule_activation(ctx, activation)
         running_tasks[next_task] = activation
 
         output: list[Message] | None = None
         history: list[Message] | None = None
 
         while running_tasks:
+            return_when = (
+                asyncio.ALL_COMPLETED
+                if waits_for_activation_rounds
+                else asyncio.FIRST_COMPLETED
+            )
             done, _ = await asyncio.wait(
                 running_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
+                return_when=return_when,
             )
 
+            next_activations: list[NodeActivation] = []
             for task in done:
                 activation = running_tasks.pop(task)
                 result = task.result()
@@ -274,22 +292,55 @@ class Graph:
                 )
                 output = [result.output]
                 history = [*activation.downstream_history, result.output]
-                ctx.emit(
+                await ctx.emit(
                     RuntimeEventName.NODE_FINISHED,
                     node=result.node.name,
                     output=result.output,
                 )
 
-                for activation in self.active_next_nodes(completed_node):
-                    next_task = self._schedule_activation(ctx, activation)
-                    running_tasks[next_task] = activation
+                ready_activations = self.active_next_nodes(completed_node)
+                if not waits_for_activation_rounds:
+                    if ready_activations and handles_activation_ready:
+                        await self._emit_activation_ready(ctx, ready_activations)
+                    for activation in ready_activations:
+                        next_task = await self._schedule_activation(ctx, activation)
+                        running_tasks[next_task] = activation
+                else:
+                    next_activations.extend(ready_activations)
 
-        ctx.emit(RuntimeEventName.GRAPH_FINISHED, graph=self.name)
+            if next_activations and handles_activation_ready:
+                await self._emit_activation_ready(ctx, next_activations)
+
+            for activation in next_activations:
+                next_task = await self._schedule_activation(ctx, activation)
+                running_tasks[next_task] = activation
+
+        await ctx.emit(RuntimeEventName.GRAPH_FINISHED, graph=self.name)
         if output is None:
             raise RuntimeError(f"graph {self.name} did not produce output")
         if history is None:
             raise RuntimeError(f"graph {self.name} did not produce history")
         return GraphRunResult(output, history)
+
+    async def _emit_activation_ready(
+        self,
+        ctx: RunContext,
+        activations: list[NodeActivation],
+    ) -> None:
+        await ctx.emit(
+            RuntimeEventName.ACTIVATION_READY,
+            store=False,
+            nodes=[activation.node.name for activation in activations],
+            edges=[
+                {
+                    "name": edge.name,
+                    "source": edge.source,
+                    "target": edge.target,
+                }
+                for activation in activations
+                for edge in activation.activation_edges
+            ],
+        )
 
 
 class GraphBuilder:

@@ -20,7 +20,7 @@ from graph_agent.message import (
     ToolCallBlock,
     ToolResultBlock,
 )
-from graph_agent.runtime import RuntimeEvent
+from graph_agent.runtime import RuntimeEvent, RuntimeEventName
 
 
 JsonValue = Any
@@ -229,12 +229,87 @@ class _ViewState:
             client.put_nowait(None)
 
 
+class _StepController:
+    handles_activation_ready = True
+    waits_for_activation_rounds = True
+
+    def __init__(self, state: _ViewState) -> None:
+        self._state = state
+        self._future: asyncio.Future[None] | None = None
+        self._step = 0
+        self._current: JsonObject | None = None
+
+    @property
+    def waiting(self) -> bool:
+        return self._future is not None and not self._future.done()
+
+    def status(self) -> JsonObject:
+        status: JsonObject = {
+            "enabled": True,
+            "waiting": self.waiting,
+            "step": self._step,
+        }
+        if self._current is not None:
+            status.update(self._current)
+            status["waiting"] = self.waiting
+        return status
+
+    async def __call__(self, event: RuntimeEvent) -> None:
+        if event.name != RuntimeEventName.ACTIVATION_READY:
+            self._state.publish(event)
+            return
+        await self.wait_for_next_step(event)
+
+    async def wait_for_next_step(self, event: RuntimeEvent) -> None:
+        self._step += 1
+        step = self._step
+        future = asyncio.get_running_loop().create_future()
+        self._future = future
+        self._current = {
+            "step": step,
+            "nodes": list(event.payload.get("nodes", [])),
+            "edges": list(event.payload.get("edges", [])),
+        }
+        self._state.publish_data(
+            {
+                "name": "viewer_step_waiting",
+                "payload": {
+                    "run_id": event.payload["run_id"],
+                    **self._current,
+                },
+            }
+        )
+        try:
+            await future
+        finally:
+            if self._future is future:
+                self._future = None
+        self._state.publish_data(
+            {
+                "name": "viewer_step_released",
+                "payload": {
+                    "run_id": event.payload["run_id"],
+                    "step": step,
+                },
+            }
+        )
+
+    def release(self) -> bool:
+        if not self.waiting or self._future is None:
+            return False
+        self._future.set_result(None)
+        return True
+
+    def close(self) -> None:
+        self.release()
+
+
 async def _write_sse(response: Any, event_data: JsonObject) -> None:
     body = json.dumps(event_data)
     await response.write(f"event: graph-event\ndata: {body}\n\n".encode("utf-8"))
 
 
-def _build_app(state: _ViewState) -> Any:
+def _build_app(state: _ViewState, step_controller: _StepController | None = None) -> Any:
     web = _load_aiohttp_web()
     app = web.Application()
 
@@ -282,10 +357,32 @@ def _build_app(state: _ViewState) -> Any:
             state.unregister(client)
         return response
 
+    async def step_status(request: Any) -> Any:
+        if step_controller is None:
+            return web.json_response(
+                {"enabled": False, "waiting": False, "step": 0}
+            )
+        return web.json_response(step_controller.status())
+
+    async def next_step(request: Any) -> Any:
+        if step_controller is None:
+            return web.json_response(
+                {
+                    "enabled": False,
+                    "waiting": False,
+                    "step": 0,
+                    "released": False,
+                }
+            )
+        released = step_controller.release()
+        return web.json_response({**step_controller.status(), "released": released})
+
     app.router.add_get("/", index)
     app.router.add_get("/static/{name}", static_asset)
     app.router.add_get("/api/graph", graph_data)
     app.router.add_get("/api/events", events)
+    app.router.add_get("/api/step", step_status)
+    app.router.add_post("/api/step", next_step)
     return app
 
 
@@ -296,6 +393,7 @@ class GraphView:
     open_browser: bool = True
     keep_open: bool = True
     quiet: bool = False
+    step_mode: bool = False
 
     @classmethod
     def run(cls, graph: Graph, **kwargs: Any) -> GraphRunResult:
@@ -319,8 +417,12 @@ class GraphView:
 
     async def serve_async(self, graph: Graph) -> GraphRunResult:
         state = _ViewState(graph)
+        step_controller = _StepController(state) if self.step_mode else None
         web = _load_aiohttp_web()
-        runner = web.AppRunner(_build_app(state), access_log=None)
+        runner = web.AppRunner(
+            _build_app(state, step_controller),
+            access_log=None,
+        )
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.port)
         await site.start()
@@ -335,7 +437,11 @@ class GraphView:
             webbrowser.open(url)
 
         try:
-            result = await graph.run(event_sink=state.publish)
+            result = await graph.run(
+                event_sink=step_controller
+                if step_controller is not None
+                else state.publish,
+            )
             if self.keep_open:
                 await self._wait_forever()
             return result
@@ -351,6 +457,8 @@ class GraphView:
             )
             raise
         finally:
+            if step_controller is not None:
+                step_controller.close()
             state.close()
             await runner.cleanup()
 

@@ -80,6 +80,7 @@ if __name__ == "__main__":
     result = GraphView.run(
         graph,
         open_browser=GRAPH_VIEW_OPEN_BROWSER,
+        step_mode=True,
     )
 
     print("Graph execution complete.")
