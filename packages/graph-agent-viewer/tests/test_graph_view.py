@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from graph_agent import (
@@ -13,6 +14,8 @@ from graph_agent import (
 from graph_agent.runtime import RunContext
 from graph_agent_viewer import GraphView
 from graph_agent_viewer.view import (
+    _StepController,
+    _ViewState,
     _read_static_text,
     graph_to_view_data,
     runtime_event_to_dict,
@@ -159,3 +162,67 @@ class GraphViewTests(unittest.TestCase):
         )
 
         self.assertEqual([message.text() for message in result.output], ["a"])
+
+    def test_step_controller_releases_one_activation_round_at_a_time(self) -> None:
+        async def scenario() -> None:
+            graph = (
+                GraphBuilder("stepper")
+                .node(StaticNode("a"))
+                .node(StaticNode("b"))
+                .start("a")
+                .edge("a", "b", name="a_to_b")
+                .build()
+            )
+            state = _ViewState(graph)
+            controller = _StepController(state)
+
+            first_step = asyncio.create_task(
+                controller.wait_for_next_step(
+                    RuntimeEvent(
+                        RuntimeEventName.ACTIVATION_READY,
+                        {"run_id": "run-1", "nodes": ["a"], "edges": []},
+                    )
+                )
+            )
+            await asyncio.sleep(0)
+
+            self.assertEqual(controller.status()["step"], 1)
+            self.assertTrue(controller.status()["waiting"])
+            self.assertEqual(state.events[-1]["name"], "viewer_step_waiting")
+            self.assertEqual(state.events[-1]["payload"]["nodes"], ["a"])
+
+            self.assertTrue(controller.release())
+            await asyncio.wait_for(first_step, timeout=1)
+            self.assertFalse(controller.status()["waiting"])
+            self.assertEqual(state.events[-1]["name"], "viewer_step_released")
+            self.assertEqual(state.events[-1]["payload"]["step"], 1)
+
+            second_step = asyncio.create_task(
+                controller.wait_for_next_step(
+                    RuntimeEvent(
+                        RuntimeEventName.ACTIVATION_READY,
+                        {
+                            "run_id": "run-1",
+                            "nodes": ["b"],
+                            "edges": [
+                                {
+                                    "name": "a_to_b",
+                                    "source": "a",
+                                    "target": "b",
+                                }
+                            ],
+                        },
+                    )
+                )
+            )
+            await asyncio.sleep(0)
+
+            self.assertEqual(controller.status()["step"], 2)
+            self.assertTrue(controller.status()["waiting"])
+            self.assertEqual(state.events[-1]["payload"]["nodes"], ["b"])
+
+            self.assertTrue(controller.release())
+            await asyncio.wait_for(second_step, timeout=1)
+            self.assertFalse(controller.release())
+
+        asyncio.run(scenario())

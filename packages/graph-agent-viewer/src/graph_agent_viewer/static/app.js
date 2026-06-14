@@ -8,6 +8,13 @@
       return JSON.stringify(value);
     }
 
+    function compactText(value, maxChars) {
+      const text = String(value || "");
+      if (text.length <= maxChars) return text;
+      if (maxChars <= 3) return text.slice(0, maxChars);
+      return `${text.slice(0, maxChars - 3)}...`;
+    }
+
     function statusByNode(graph, events) {
       const status = Object.fromEntries((graph.nodes || []).map((node) => [node.id, "pending"]));
       for (const event of events) {
@@ -50,17 +57,21 @@
         grouped[level].push(node);
       }
       const positions = {};
-      const columnWidth = 198;
+      const columnWidth = 144;
       const rowHeight = 64;
+      const leftMargin = 28;
+      const topMargin = 58;
+      const nodeWidth = 70;
+      const nodeHeight = 28;
       for (const [levelText, group] of Object.entries(grouped)) {
         const level = Number(levelText);
         group.sort((a, b) => a.id.localeCompare(b.id));
         group.forEach((node, index) => {
           positions[node.id] = {
-            x: 48 + level * columnWidth,
-            y: 58 + index * rowHeight,
-            width: 68,
-            height: 28,
+            x: leftMargin + level * columnWidth,
+            y: topMargin + index * rowHeight,
+            width: nodeWidth,
+            height: nodeHeight,
           };
         });
       }
@@ -70,7 +81,7 @@
         nodes,
         edges: edges.filter((edge) => byId[edge.source] && byId[edge.target]),
         positions,
-        width: 96 + (maxLevel + 1) * columnWidth,
+        width: leftMargin * 2 + nodeWidth + maxLevel * columnWidth,
         height: 96 + maxRows * rowHeight,
       };
     }
@@ -216,6 +227,7 @@
               const label = edge.name;
               const labelGap = Math.max(46, Math.abs(x2 - x1) - 16);
               const labelWidth = Math.min(160, labelGap, Math.max(46, label.length * 7 + 18));
+              const visibleLabel = compactText(label, Math.max(4, Math.floor((labelWidth - 12) / 6.4)));
               const labelX = midX - labelWidth / 2;
               const labelDirection = lane === 0 ? -1 : Math.sign(lane);
               const labelCenterY = pathMidY + labelDirection * 34;
@@ -228,7 +240,7 @@
                 clickable ? h("path", {className: "edge-hit", d: edgePath}) : null,
                 h("path", {className: "edge-path", markerEnd: "url(#arrow)", d: edgePath}),
                 h("rect", {className: "edge-label-bg", x: labelX, y: labelY, width: labelWidth, height: 20}),
-                h("text", {className: "edge-label", x: midX, y: labelY + 14, textAnchor: "middle"}, label)
+                h("text", {className: "edge-label", x: midX, y: labelY + 14, textAnchor: "middle"}, visibleLabel)
               );
             }),
             layout.nodes.map((node) => {
