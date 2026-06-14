@@ -170,6 +170,7 @@ def graph_to_view_data(graph: Graph) -> JsonObject:
     return {
         "name": graph.name,
         "start_node": graph.start_node,
+        "layout_direction": getattr(graph, "view_layout_direction", "horizontal"),
         "input_messages": [
             _message_to_dict(message) for message in graph.input_messages
         ],

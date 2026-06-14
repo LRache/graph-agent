@@ -52,6 +52,7 @@ def message(role: str, text: str) -> JsonObject:
 GRAPH: JsonObject = {
     "name": "mock_react_stepper",
     "start_node": NODES[0][0],
+    "layout_direction": "vertical",
     "input_messages": [message("user", "mock request: plan, act, observe, answer")],
     "nodes": [
         {

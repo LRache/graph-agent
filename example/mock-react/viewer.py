@@ -67,7 +67,9 @@ def build_graph():
             name=edge_name,
         )
 
-    return builder.build()
+    graph = builder.build()
+    graph.view_layout_direction = "vertical"
+    return graph
 
 
 if __name__ == "__main__":

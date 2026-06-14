@@ -15,6 +15,20 @@
       return `${text.slice(0, maxChars - 3)}...`;
     }
 
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function ResizeHandle({axis, label, onPointerDown}) {
+      return h("button", {
+        "aria-label": label,
+        className: `splitter ${axis}`,
+        onPointerDown,
+        title: label,
+        type: "button",
+      });
+    }
+
     function statusByNode(graph, events) {
       const status = Object.fromEntries((graph.nodes || []).map((node) => [node.id, "pending"]));
       for (const event of events) {
@@ -30,6 +44,8 @@
     function layoutGraph(graph) {
       const nodes = graph.nodes || [];
       const edges = graph.edges || [];
+      const direction = graph.layout_direction === "vertical" ? "vertical" : "horizontal";
+      const vertical = direction === "vertical";
       const byId = Object.fromEntries(nodes.map((node) => [node.id, node]));
       const levels = {};
       const queue = [];
@@ -57,10 +73,10 @@
         grouped[level].push(node);
       }
       const positions = {};
-      const columnWidth = 144;
-      const rowHeight = 64;
-      const leftMargin = 28;
-      const topMargin = 58;
+      const columnWidth = vertical ? 112 : 144;
+      const rowHeight = vertical ? 78 : 64;
+      const leftMargin = vertical ? 56 : 28;
+      const topMargin = vertical ? 28 : 58;
       const nodeWidth = 70;
       const nodeHeight = 28;
       for (const [levelText, group] of Object.entries(grouped)) {
@@ -68,8 +84,8 @@
         group.sort((a, b) => a.id.localeCompare(b.id));
         group.forEach((node, index) => {
           positions[node.id] = {
-            x: leftMargin + level * columnWidth,
-            y: topMargin + index * rowHeight,
+            x: leftMargin + (vertical ? index : level) * columnWidth,
+            y: topMargin + (vertical ? level : index) * rowHeight,
             width: nodeWidth,
             height: nodeHeight,
           };
@@ -78,11 +94,16 @@
       const maxLevel = Math.max(0, ...Object.values(levels));
       const maxRows = Math.max(1, ...Object.values(grouped).map((group) => group.length));
       return {
+        direction,
         nodes,
         edges: edges.filter((edge) => byId[edge.source] && byId[edge.target]),
         positions,
-        width: leftMargin * 2 + nodeWidth + maxLevel * columnWidth,
-        height: 96 + maxRows * rowHeight,
+        width: vertical
+          ? Math.max(180, leftMargin * 2 + nodeWidth + (maxRows - 1) * columnWidth)
+          : leftMargin * 2 + nodeWidth + maxLevel * columnWidth,
+        height: vertical
+          ? topMargin * 2 + nodeHeight + maxLevel * rowHeight
+          : 96 + maxRows * rowHeight,
       };
     }
 
@@ -180,8 +201,11 @@
           window.removeEventListener("mouseup", stop);
         };
       }, [drag, layout.positions, layout.width, layout.height]);
+      const titleMeta = visibleEdges.length === 0 && emptyText
+        ? compactText(emptyText, 24)
+        : graph.start_node || "";
       return h("div", {className: "panel"},
-        h("div", {className: "panel-title"}, h("span", null, title), h("span", null, graph.start_node || "")),
+        h("div", {className: "panel-title"}, h("span", null, title), h("span", {className: "panel-title-meta"}, titleMeta)),
         h("div", {className: "graph-canvas"},
           h("svg", {
             viewBox: `0 0 ${layout.width} ${layout.height}`,
@@ -200,37 +224,42 @@
                 h("path", {d: "M0,0 L0,6 L9,3 z", fill: "#94a3b8"})
               )
             ),
-            visibleEdges.length === 0 ? h("text", {x: 24, y: 32, className: "edge-label"}, emptyText || "") : null,
             visibleEdges.map((edge) => {
               const source = positions[edge.source];
               const target = positions[edge.target];
               if (!source || !target) return null;
-              const sourceCenterX = source.x + source.width / 2;
-              const targetCenterX = target.x + target.width / 2;
-              const backward = sourceCenterX > targetCenterX;
-              const x1 = backward ? source.x : source.x + source.width;
-              const y1 = source.y + source.height / 2;
-              const x2 = backward ? target.x + target.width : target.x;
-              const y2 = target.y + target.height / 2;
               const lane = edgeLanes[edge.id] || 0;
               const bend = lane * 36;
-              const controlOffset = Math.max(42, Math.abs(x2 - x1) / 2);
-              const c1x = backward ? x1 - controlOffset : x1 + controlOffset;
-              const c2x = backward ? x2 + controlOffset : x2 - controlOffset;
-              const c1y = y1 + bend;
-              const c2y = y2 + bend;
+              const verticalEdge = layout.direction === "vertical";
+              const sourceCenterX = source.x + source.width / 2;
+              const sourceCenterY = source.y + source.height / 2;
+              const targetCenterX = target.x + target.width / 2;
+              const targetCenterY = target.y + target.height / 2;
+              const backward = verticalEdge ? sourceCenterY > targetCenterY : sourceCenterX > targetCenterX;
+              const x1 = verticalEdge ? sourceCenterX : (backward ? source.x : source.x + source.width);
+              const y1 = verticalEdge ? (backward ? source.y : source.y + source.height) : sourceCenterY;
+              const x2 = verticalEdge ? targetCenterX : (backward ? target.x + target.width : target.x);
+              const y2 = verticalEdge ? (backward ? target.y + target.height : target.y) : targetCenterY;
+              const controlOffset = verticalEdge ? Math.max(32, Math.abs(y2 - y1) / 2) : Math.max(42, Math.abs(x2 - x1) / 2);
+              const c1x = verticalEdge ? x1 + bend : (backward ? x1 - controlOffset : x1 + controlOffset);
+              const c2x = verticalEdge ? x2 + bend : (backward ? x2 + controlOffset : x2 - controlOffset);
+              const c1y = verticalEdge ? (backward ? y1 - controlOffset : y1 + controlOffset) : y1 + bend;
+              const c2y = verticalEdge ? (backward ? y2 + controlOffset : y2 - controlOffset) : y2 + bend;
               const edgePath = `M${x1},${y1} C${c1x},${c1y} ${c2x},${c2y} ${x2},${y2}`;
-              const midX = (x1 + x2) / 2;
-              const pathMidY = (y1 + y2) / 2 + bend;
+              const midX = verticalEdge ? (x1 + x2) / 2 + bend : (x1 + x2) / 2;
+              const pathMidY = verticalEdge ? (y1 + y2) / 2 : (y1 + y2) / 2 + bend;
               const selected = selectedEdgeId === edge.id;
               const clickable = Boolean(onEdgeClick);
               const label = edge.name;
-              const labelGap = Math.max(46, Math.abs(x2 - x1) - 16);
-              const labelWidth = Math.min(160, labelGap, Math.max(46, label.length * 7 + 18));
+              const labelGap = verticalEdge ? 82 : Math.max(46, Math.abs(x2 - x1) - 16);
+              const labelWidth = Math.min(verticalEdge ? 82 : 160, labelGap, Math.max(46, label.length * 7 + 18));
               const visibleLabel = compactText(label, Math.max(4, Math.floor((labelWidth - 12) / 6.4)));
-              const labelX = midX - labelWidth / 2;
               const labelDirection = lane === 0 ? -1 : Math.sign(lane);
-              const labelCenterY = pathMidY + labelDirection * 34;
+              const labelCenterX = verticalEdge
+                ? clamp(midX - labelDirection * 44, labelWidth / 2 + 4, layout.width - labelWidth / 2 - 4)
+                : midX;
+              const labelX = labelCenterX - labelWidth / 2;
+              const labelCenterY = verticalEdge ? pathMidY : pathMidY + labelDirection * 34;
               const labelY = Math.max(10, Math.min(layout.height - 30, labelCenterY - 10));
               return h("g", {
                 key: edge.id,
@@ -240,7 +269,7 @@
                 clickable ? h("path", {className: "edge-hit", d: edgePath}) : null,
                 h("path", {className: "edge-path", markerEnd: "url(#arrow)", d: edgePath}),
                 h("rect", {className: "edge-label-bg", x: labelX, y: labelY, width: labelWidth, height: 20}),
-                h("text", {className: "edge-label", x: midX, y: labelY + 14, textAnchor: "middle"}, visibleLabel)
+                h("text", {className: "edge-label", x: labelCenterX, y: labelY + 14, textAnchor: "middle"}, visibleLabel)
               );
             }),
             layout.nodes.map((node) => {
@@ -273,9 +302,8 @@
       });
     }
 
-    function DynamicGraph({graph, events, selectedEdgeId, onEdgeClick}) {
+    function DynamicGraph({graph, events, edges, selectedEdgeId, onEdgeClick}) {
       const statuses = useMemo(() => statusByNode(graph, events), [graph, events]);
-      const edges = useMemo(() => activationEdges(events), [events]);
       return h(GraphDiagram, {
         graph,
         title: "Runtime Graph",
@@ -485,9 +513,15 @@
       const [graph, setGraph] = useState(null);
       const [events, setEvents] = useState([]);
       const [error, setError] = useState(null);
-      const [selectedEdge, setSelectedEdge] = useState(null);
+      const [selectedEdgeId, setSelectedEdgeId] = useState(null);
       const [stepStatus, setStepStatus] = useState({enabled: false, waiting: false, step: 0});
       const [advancingStep, setAdvancingStep] = useState(false);
+      const [layout, setLayout] = useState({
+        mainLeft: 64,
+        workspaceTop: 50,
+        asideTop: 32,
+        asideMiddle: 40,
+      });
       useEffect(() => {
         fetch("/api/graph")
           .then((response) => {
@@ -548,6 +582,87 @@
           })
           .finally(() => setAdvancingStep(false));
       }
+      function beginResize(event, axis, onMove) {
+        if (event.button != null && event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const cursorClass = axis === "vertical" ? "resizing-col" : "resizing-row";
+        document.body.classList.add(cursorClass);
+        function move(moveEvent) {
+          moveEvent.preventDefault();
+          onMove(moveEvent);
+        }
+        function stop() {
+          document.body.classList.remove(cursorClass);
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", stop);
+          window.removeEventListener("pointercancel", stop);
+        }
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", stop);
+        window.addEventListener("pointercancel", stop);
+      }
+      function resizeMain(event) {
+        const rect = event.currentTarget.parentElement.getBoundingClientRect();
+        const startX = event.clientX;
+        const startLeft = layout.mainLeft;
+        beginResize(event, "vertical", (moveEvent) => {
+          const delta = ((moveEvent.clientX - startX) / rect.width) * 100;
+          setLayout((current) => ({
+            ...current,
+            mainLeft: clamp(startLeft + delta, 38, 76),
+          }));
+        });
+      }
+      function resizeWorkspace(event) {
+        const rect = event.currentTarget.parentElement.getBoundingClientRect();
+        const startY = event.clientY;
+        const startTop = layout.workspaceTop;
+        beginResize(event, "horizontal", (moveEvent) => {
+          const delta = ((moveEvent.clientY - startY) / rect.height) * 100;
+          setLayout((current) => ({
+            ...current,
+            workspaceTop: clamp(startTop + delta, 24, 76),
+          }));
+        });
+      }
+      function resizeAsideTop(event) {
+        const rect = event.currentTarget.parentElement.getBoundingClientRect();
+        const startY = event.clientY;
+        const startTop = layout.asideTop;
+        const startMiddle = layout.asideMiddle;
+        const startBottom = 100 - startTop - startMiddle;
+        beginResize(event, "horizontal", (moveEvent) => {
+          const delta = ((moveEvent.clientY - startY) / rect.height) * 100;
+          const nextTop = clamp(startTop + delta, 16, 100 - startBottom - 16);
+          setLayout((current) => ({
+            ...current,
+            asideTop: nextTop,
+            asideMiddle: 100 - startBottom - nextTop,
+          }));
+        });
+      }
+      function resizeAsideMiddle(event) {
+        const rect = event.currentTarget.parentElement.getBoundingClientRect();
+        const startY = event.clientY;
+        const startTop = layout.asideTop;
+        const startMiddle = layout.asideMiddle;
+        beginResize(event, "horizontal", (moveEvent) => {
+          const delta = ((moveEvent.clientY - startY) / rect.height) * 100;
+          setLayout((current) => ({
+            ...current,
+            asideMiddle: clamp(startMiddle + delta, 16, 100 - startTop - 16),
+          }));
+        });
+      }
+      const runtimeEdges = useMemo(() => activationEdges(events), [events]);
+      const selectedEdge = useMemo(() => {
+        if (runtimeEdges.length === 0) return null;
+        if (selectedEdgeId) {
+          return runtimeEdges.find((edge) => edge.id === selectedEdgeId) || runtimeEdges[runtimeEdges.length - 1];
+        }
+        return runtimeEdges[runtimeEdges.length - 1];
+      }, [runtimeEdges, selectedEdgeId]);
       const stats = useMemo(() => {
         if (!graph) return {nodes: 0, edges: 0, running: 0, finished: 0};
         const statuses = statusByNode(graph, events);
@@ -560,6 +675,15 @@
       }, [graph, events]);
       if (error) return h("div", {className: "empty"}, error);
       if (!graph) return h("div", {className: "empty"}, "Loading");
+      const layoutStyle = {
+        "--main-left-fr": `${layout.mainLeft}fr`,
+        "--main-right-fr": `${100 - layout.mainLeft}fr`,
+        "--workspace-top-fr": `${layout.workspaceTop}fr`,
+        "--workspace-bottom-fr": `${100 - layout.workspaceTop}fr`,
+        "--aside-top-fr": `${layout.asideTop}fr`,
+        "--aside-middle-fr": `${layout.asideMiddle}fr`,
+        "--aside-bottom-fr": `${100 - layout.asideTop - layout.asideMiddle}fr`,
+      };
       return h("div", {className: "shell"},
         h("header", null,
           h("div", null, h("h1", null, graph.name), h("div", {className: "subtitle"}, `start: ${graph.start_node || "none"}`)),
@@ -582,19 +706,40 @@
             )
           )
         ),
-        h("main", null,
+        h("main", {style: layoutStyle},
           h("section", {className: "workspace"},
             h(StaticGraph, {graph}),
+            h(ResizeHandle, {
+              axis: "horizontal",
+              label: "Resize graph panels",
+              onPointerDown: resizeWorkspace,
+            }),
             h(DynamicGraph, {
               graph,
               events,
+              edges: runtimeEdges,
               selectedEdgeId: selectedEdge && selectedEdge.id,
-              onEdgeClick: setSelectedEdge,
+              onEdgeClick: (edge) => setSelectedEdgeId(edge.id),
             })
           ),
+          h(ResizeHandle, {
+            axis: "vertical",
+            label: "Resize main columns",
+            onPointerDown: resizeMain,
+          }),
           h("aside", null,
             h(ActivationDetails, {edge: selectedEdge}),
+            h(ResizeHandle, {
+              axis: "horizontal",
+              label: "Resize activation and outputs panels",
+              onPointerDown: resizeAsideTop,
+            }),
             h(Outputs, {events}),
+            h(ResizeHandle, {
+              axis: "horizontal",
+              label: "Resize outputs and runtime panels",
+              onPointerDown: resizeAsideMiddle,
+            }),
             h(Timeline, {events})
           )
         )

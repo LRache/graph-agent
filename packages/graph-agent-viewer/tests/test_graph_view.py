@@ -54,7 +54,12 @@ class GraphViewTests(unittest.TestCase):
         self.assertIn("/static/styles.css", _read_static_text("index.html"))
         self.assertIn("/static/app.js", _read_static_text("index.html"))
         self.assertIn("function App()", _read_static_text("app.js"))
+        self.assertIn("function ResizeHandle", _read_static_text("app.js"))
+        self.assertIn("runtimeEdges[runtimeEdges.length - 1]", _read_static_text("app.js"))
+        self.assertIn("const titleMeta", _read_static_text("app.js"))
         self.assertIn(".graph-canvas", _read_static_text("styles.css"))
+        self.assertIn(".splitter", _read_static_text("styles.css"))
+        self.assertIn(".panel-title-meta", _read_static_text("styles.css"))
 
     def test_graph_to_view_data_includes_static_structure(self) -> None:
         graph = (
@@ -71,6 +76,7 @@ class GraphViewTests(unittest.TestCase):
 
         self.assertEqual(data["name"], "viewer_demo")
         self.assertEqual(data["start_node"], "a")
+        self.assertEqual(data["layout_direction"], "horizontal")
         self.assertEqual(
             data["nodes"],
             [
@@ -91,6 +97,19 @@ class GraphViewTests(unittest.TestCase):
             ],
         )
         self.assertEqual(data["input_messages"][0]["text"], "hello")
+
+    def test_graph_to_view_data_can_use_vertical_layout_direction(self) -> None:
+        graph = (
+            GraphBuilder("viewer_demo")
+            .node(StaticNode("a"))
+            .start("a")
+            .build()
+        )
+        graph.view_layout_direction = "vertical"
+
+        data = graph_to_view_data(graph)
+
+        self.assertEqual(data["layout_direction"], "vertical")
 
     def test_runtime_event_to_dict_serializes_messages_for_react(self) -> None:
         event = RuntimeEvent(
