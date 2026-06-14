@@ -135,6 +135,17 @@
         }
         return merged;
       }, [layout.positions, manualPositions]);
+      const canvasSize = useMemo(() => {
+        const right = Math.max(
+          layout.width,
+          ...Object.values(positions).map((pos) => pos.x + pos.width + 48)
+        );
+        const bottom = Math.max(
+          layout.height,
+          ...Object.values(positions).map((pos) => pos.y + pos.height + 48)
+        );
+        return {width: right, height: bottom};
+      }, [layout.width, layout.height, positions]);
       function svgPointFor(svg, event) {
         const point = svg.createSVGPoint();
         point.x = event.clientX;
@@ -165,8 +176,8 @@
         const point = svgPointFor(currentDrag.svg, event);
         const base = layout.positions[currentDrag.nodeId];
         if (!base) return;
-        const nextX = Math.max(8, Math.min(layout.width - base.width - 8, point.x - currentDrag.offsetX));
-        const nextY = Math.max(8, Math.min(layout.height - base.height - 8, point.y - currentDrag.offsetY));
+        const nextX = Math.max(8, point.x - currentDrag.offsetX);
+        const nextY = Math.max(8, point.y - currentDrag.offsetY);
         setManualPositions((current) => ({
           ...current,
           [currentDrag.nodeId]: {x: nextX, y: nextY},
@@ -200,7 +211,7 @@
           window.removeEventListener("mousemove", move);
           window.removeEventListener("mouseup", stop);
         };
-      }, [drag, layout.positions, layout.width, layout.height]);
+      }, [drag, layout.positions]);
       const titleMeta = visibleEdges.length === 0 && emptyText
         ? compactText(emptyText, 24)
         : graph.start_node || "";
@@ -208,9 +219,9 @@
         h("div", {className: "panel-title"}, h("span", null, title), h("span", {className: "panel-title-meta"}, titleMeta)),
         h("div", {className: "graph-canvas"},
           h("svg", {
-            viewBox: `0 0 ${layout.width} ${layout.height}`,
-            width: layout.width,
-            height: layout.height,
+            viewBox: `0 0 ${canvasSize.width} ${canvasSize.height}`,
+            width: canvasSize.width,
+            height: canvasSize.height,
             role: "img",
             onPointerMove: onNodePointerMove,
             onPointerUp: onNodePointerUp,
@@ -256,11 +267,11 @@
               const visibleLabel = compactText(label, Math.max(4, Math.floor((labelWidth - 12) / 6.4)));
               const labelDirection = lane === 0 ? -1 : Math.sign(lane);
               const labelCenterX = verticalEdge
-                ? clamp(midX - labelDirection * 44, labelWidth / 2 + 4, layout.width - labelWidth / 2 - 4)
+                ? clamp(midX - labelDirection * 44, labelWidth / 2 + 4, canvasSize.width - labelWidth / 2 - 4)
                 : midX;
               const labelX = labelCenterX - labelWidth / 2;
               const labelCenterY = verticalEdge ? pathMidY : pathMidY + labelDirection * 34;
-              const labelY = Math.max(10, Math.min(layout.height - 30, labelCenterY - 10));
+              const labelY = Math.max(10, Math.min(canvasSize.height - 30, labelCenterY - 10));
               return h("g", {
                 key: edge.id,
                 className: `${clickable ? "edge-clickable" : ""} ${selected ? "edge-selected" : ""}`,

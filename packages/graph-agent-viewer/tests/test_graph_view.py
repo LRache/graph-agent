@@ -55,6 +55,7 @@ class GraphViewTests(unittest.TestCase):
         self.assertIn("/static/app.js", _read_static_text("index.html"))
         self.assertIn("function App()", _read_static_text("app.js"))
         self.assertIn("function ResizeHandle", _read_static_text("app.js"))
+        self.assertIn("const canvasSize", _read_static_text("app.js"))
         self.assertIn("runtimeEdges[runtimeEdges.length - 1]", _read_static_text("app.js"))
         self.assertIn("const titleMeta", _read_static_text("app.js"))
         self.assertIn(".graph-canvas", _read_static_text("styles.css"))
