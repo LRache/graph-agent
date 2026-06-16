@@ -13,8 +13,9 @@ The package currently includes:
 - an explicit graph start node that receives configured input
 - graph results from the last completed node
 
-This repository also contains the `graph-agent-viewer` package under
-`packages/graph-agent-viewer` for visualization and viewer-related helpers.
+The `graph-agent` package lives under `packages/graph-agent`. This repository
+also contains the `graph-agent-viewer` package under `packages/graph-agent-viewer`
+for visualization and viewer-related helpers.
 
 ## OpenAI provider
 

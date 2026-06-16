@@ -96,6 +96,7 @@ class Graph:
         self.edges: list[Edge] = []
         self.input_messages: list[Message] = []
         self.start_node = start_node
+        self.view_layout_direction = "horizontal"
         self._has_run = False
 
     def _dependency_history(self, state: NodeState) -> list[Message]:
