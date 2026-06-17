@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from graph_agent.message import ContentBlock, Message, MessageRole
+from graph_agent.core.message import ContentBlock, Message, MessageRole
 from graph_agent.runtime import RunContext
 
 if TYPE_CHECKING:
-    from graph_agent.graph.edge import Edge
+    from graph_agent.core.edge import Edge
 
 
 class NodeKind(StrEnum):
@@ -76,8 +76,18 @@ class Node(Protocol):
         的输出会单独放在 upstream_outputs 中，key 是入边名称，形如
         {"tool_a_result": message, "tool_b_result": message}。
         llm_b.prepare_downstream_history 的返回值会作为 llm_b 下游节点看到的 history。
+
+        默认实现会按顺序返回 history 后接 upstream_outputs.values()，并按
+        Message.uuid 去重。
         """
-        raise NotImplementedError
+        messages: list[Message] = []
+        seen_uuids: set[str] = set()
+        for message in [*history, *upstream_outputs.values()]:
+            if message.uuid in seen_uuids:
+                continue
+            seen_uuids.add(message.uuid)
+            messages.append(message)
+        return messages
 
     async def invoke(
         self,

@@ -12,6 +12,8 @@ from uuid import uuid4
 class RuntimeEventName(StrEnum):
     GRAPH_STARTED = "graph_started"
     GRAPH_FINISHED = "graph_finished"
+    GRAPH_CANCELLED = "graph_cancelled"
+    GRAPH_FAILED = "graph_failed"
     ACTIVATION_READY = "activation_ready"
     NODE_ACTIVATED = "node_activated"
     NODE_STARTED = "node_started"

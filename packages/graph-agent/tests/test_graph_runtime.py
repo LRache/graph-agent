@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 
 from graph_agent import (
@@ -6,7 +7,9 @@ from graph_agent import (
     ContentBlock,
     Edge,
     FunctionTool,
+    GRAPH_STATE_SCHEMA,
     GraphBuilder,
+    GraphRunStatus,
     LLMNode,
     matches_any_tool_call_for_downstream,
     matches_tool_call,
@@ -26,8 +29,181 @@ from graph_agent.runtime import RunContext
 from tests.helpers import CallableNode, RecordingProvider
 
 
+def _seed_node() -> CallableNode:
+    return CallableNode(
+        "seed",
+        lambda ctx, history, upstream: Message.assistant_text("seed"),
+    )
+
+
+class _CancellingTestNode(Node):
+    name = "left"
+
+    def __init__(self, started: asyncio.Event):
+        self.started = started
+
+    def prepare_downstream_history(self, upstream_outputs, history):
+        return list(history)
+
+    async def invoke(self, ctx, history, upstream_outputs, **extra):
+        self.started.set()
+        ctx.cancel()
+        return NodeResult(self, Message.assistant_text("left"))
+
+    def kind(self):
+        return NodeKind.LLM
+
+
+class _BlockingTestNode(Node):
+    name = "right"
+
+    def __init__(
+        self,
+        started: asyncio.Event,
+        release: asyncio.Event,
+        finished: asyncio.Event | None = None,
+    ):
+        self.started = started
+        self.release = release
+        self.finished = finished
+
+    def prepare_downstream_history(self, upstream_outputs, history):
+        return list(history)
+
+    async def invoke(self, ctx, history, upstream_outputs, **extra):
+        self.started.set()
+        await self.release.wait()
+        if self.finished is not None:
+            self.finished.set()
+        return NodeResult(self, Message.assistant_text("right"))
+
+    def kind(self):
+        return NodeKind.LLM
+
+
+class _FailingAfterPeerStartsNode(Node):
+    def __init__(
+        self,
+        name: str,
+        started: asyncio.Event,
+        peer_started: asyncio.Event,
+    ):
+        self.name = name
+        self.started = started
+        self.peer_started = peer_started
+
+    def prepare_downstream_history(self, upstream_outputs, history):
+        return list(history)
+
+    async def invoke(self, ctx, history, upstream_outputs, **extra):
+        self.started.set()
+        await self.peer_started.wait()
+        raise RuntimeError(f"{self.name} failed")
+
+    def kind(self):
+        return NodeKind.LLM
+
+
+class _CancellableBlockingTestNode(Node):
+    def __init__(
+        self,
+        name: str,
+        started: asyncio.Event,
+        cancelled: asyncio.Event,
+    ):
+        self.name = name
+        self.started = started
+        self.cancelled = cancelled
+
+    def prepare_downstream_history(self, upstream_outputs, history):
+        return list(history)
+
+    async def invoke(self, ctx, history, upstream_outputs, **extra):
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+    def kind(self):
+        return NodeKind.LLM
+
+
+class _RecordingTestNode(Node):
+    def __init__(self, name: str, invocations: list[str]):
+        self.name = name
+        self.invocations = invocations
+
+    def prepare_downstream_history(self, upstream_outputs, history):
+        return list(history)
+
+    async def invoke(self, ctx, history, upstream_outputs, **extra):
+        self.invocations.append(self.name)
+        return NodeResult(self, Message.assistant_text(self.name))
+
+    def kind(self):
+        return NodeKind.LLM
+
 
 class GraphRuntimeTests(unittest.TestCase):
+    def test_default_node_prepare_downstream_history_deduplicates_uuid_in_order(self):
+        class DefaultPrepareNode(Node):
+            name = "default_prepare"
+
+            async def invoke(self, ctx, history, upstream_outputs, **extra):
+                return NodeResult(self, Message.assistant_text("output"))
+
+            def kind(self):
+                return NodeKind.LLM
+
+        node = DefaultPrepareNode()
+        history_message = Message.user_text(
+            "history",
+            uuid="00000000-0000-4000-8000-000000000001",
+        )
+        duplicate_uuid_output = Message.assistant_text(
+            "duplicate uuid",
+            uuid=history_message.uuid,
+        )
+        second_output = Message.assistant_text(
+            "second",
+            uuid="00000000-0000-4000-8000-000000000002",
+        )
+
+        downstream_history = node.prepare_downstream_history(
+            {
+                "duplicate": duplicate_uuid_output,
+                "second": second_output,
+            },
+            [history_message],
+        )
+
+        self.assertEqual(downstream_history, [history_message, second_output])
+
+    def test_edge_round_trips_serialized_shape(self):
+        def active(result, edge, downstream_node):
+            return True
+
+        edge = Edge("to_target", "source", "target", active=active)
+
+        self.assertEqual(
+            edge.to_dict(),
+            {
+                "name": "to_target",
+                "source": "source",
+                "target": "target",
+                "active": True,
+            },
+        )
+
+        restored = Edge.from_dict(edge.to_dict(), active=active)
+
+        self.assertEqual(restored.name, "to_target")
+        self.assertEqual(restored.source, "source")
+        self.assertEqual(restored.target, "target")
+        self.assertIs(restored.active, active)
+
     def test_unbound_tool_call_predicate_does_not_match_without_tools(self):
         def source(ctx, history, upstream_outputs):
             return Message.assistant_text("source")
@@ -321,7 +497,7 @@ class GraphRuntimeTests(unittest.TestCase):
 
         self.assertEqual(activations, [])
         self.assertEqual(graph.node_states["lookup_tools"].finished_dependency, 0)
-        self.assertEqual(graph.node_states["lookup_tools"].dependency_outputs, {})
+        self.assertEqual(graph.node_states["lookup_tools"].dependency_results, {})
 
     def test_tool_edges_do_not_filter_without_explicit_active(self):
         def source(ctx, history, upstream_outputs):
@@ -399,6 +575,366 @@ class GraphRuntimeTests(unittest.TestCase):
             ["start", "first", "second"],
         )
         self.assertIs(result.history[-1], result.output[0])
+
+    def test_graph_run_returns_serialized_state(self):
+        def first(ctx, history, upstream_outputs):
+            return Message.assistant_text("first")
+
+        def second(ctx, history, upstream_outputs):
+            return Message.assistant_text("second")
+
+        graph = (
+            GraphBuilder("state_snapshot")
+            .input([Message.user_text("start")])
+            .node(CallableNode("first", first))
+            .node(CallableNode("second", second))
+            .start("first")
+            .edge("first", "second", name="first_to_second")
+            .build()
+        )
+
+        result = asyncio.run(graph.run())
+        payload = json.loads(json.dumps(result.state))
+
+        self.assertEqual(result.status, GraphRunStatus.COMPLETED)
+        self.assertEqual(payload["schema"], GRAPH_STATE_SCHEMA)
+        self.assertEqual(payload["graph"], "state_snapshot")
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["pending_completed_nodes"], [])
+        self.assertEqual(
+            payload["node_states"]["first"]["completed"]["output"]["blocks"],
+            [{"kind": "text", "text": "first"}],
+        )
+        self.assertEqual(
+            payload["node_states"]["second"]["dependency_results"][
+                "first_to_second"
+            ]["output"]["blocks"],
+            [{"kind": "text", "text": "first"}],
+        )
+        self.assertEqual(
+            payload["node_states"]["second"]["completed"]["output"]["blocks"],
+            [{"kind": "text", "text": "second"}],
+        )
+
+    def test_graph_builder_restores_state_after_nodes_and_edges_are_registered(self):
+        def first(ctx, history, upstream_outputs):
+            return Message.assistant_text("first")
+
+        def second(ctx, history, upstream_outputs):
+            return Message.assistant_text("second")
+
+        graph = (
+            GraphBuilder("builder_restore")
+            .input([Message.user_text("start")])
+            .node(CallableNode("first", first))
+            .node(CallableNode("second", second))
+            .start("first")
+            .edge("first", "second", name="first_to_second")
+            .build()
+        )
+        state = json.loads(json.dumps(asyncio.run(graph.run()).state))
+
+        restored = (
+            GraphBuilder()
+            .state(state)
+            .node(CallableNode("first", first))
+            .node(CallableNode("second", second))
+            .edge("first", "second", name="first_to_second")
+            .build()
+        )
+
+        self.assertEqual(restored.name, "builder_restore")
+        self.assertEqual(restored.start_node, "first")
+        self.assertEqual([message.text() for message in restored.input_messages], ["start"])
+        self.assertEqual(
+            restored.node_states["second"].finished_dependency,
+            1,
+        )
+        first_dependency = restored.node_states["second"].dependency_results[
+            "first_to_second"
+        ]
+        self.assertEqual(first_dependency.output.text(), "first")
+        self.assertIs(first_dependency.node, restored.nodes["first"])
+        self.assertIs(first_dependency.activation.node, restored.nodes["first"])
+        self.assertEqual(
+            restored.node_states["second"].completed.output.text(),
+            "second",
+        )
+
+    def test_graph_builder_rejects_state_with_mismatched_edge_predicate_shape(self):
+        def active(result, edge, downstream_node):
+            return True
+
+        def first(ctx, history, upstream_outputs):
+            return Message.assistant_text("first")
+
+        def second(ctx, history, upstream_outputs):
+            return Message.assistant_text("second")
+
+        graph = (
+            GraphBuilder("predicate_state")
+            .node(CallableNode("first", first))
+            .node(CallableNode("second", second))
+            .start("first")
+            .edge("first", "second", name="first_to_second", active=active)
+            .build()
+        )
+        state = json.loads(json.dumps(asyncio.run(graph.run()).state))
+
+        with self.assertRaisesRegex(ValueError, "do not match graph"):
+            (
+                GraphBuilder()
+                .state(state)
+                .node(CallableNode("first", first))
+                .node(CallableNode("second", second))
+                .edge("first", "second", name="first_to_second")
+                .build()
+            )
+
+    def test_graph_builder_rejects_state_with_mismatched_dependency_count(self):
+        def first(ctx, history, upstream_outputs):
+            return Message.assistant_text("first")
+
+        def second(ctx, history, upstream_outputs):
+            return Message.assistant_text("second")
+
+        graph = (
+            GraphBuilder("dependency_state")
+            .node(CallableNode("first", first))
+            .node(CallableNode("second", second))
+            .start("first")
+            .edge("first", "second", name="first_to_second")
+            .build()
+        )
+        state = json.loads(json.dumps(asyncio.run(graph.run()).state))
+        state["node_states"]["second"]["finished_dependency"] = 0
+
+        with self.assertRaisesRegex(ValueError, "finished dependency count"):
+            (
+                GraphBuilder()
+                .state(state)
+                .node(CallableNode("first", first))
+                .node(CallableNode("second", second))
+                .edge("first", "second", name="first_to_second")
+                .build()
+            )
+
+    def test_cancelled_graph_waits_for_running_nodes_and_serializes_state(self):
+        async def scenario():
+            left_started = asyncio.Event()
+            right_started = asyncio.Event()
+            right_release = asyncio.Event()
+            right_finished = asyncio.Event()
+            child_invocations = []
+
+            graph = (
+                GraphBuilder("cancel_state")
+                .node(_seed_node())
+                .node(_CancellingTestNode(left_started))
+                .node(_BlockingTestNode(right_started, right_release, right_finished))
+                .node(_RecordingTestNode("left_child", child_invocations))
+                .node(_RecordingTestNode("right_child", child_invocations))
+                .start("seed")
+                .edge("seed", "left", name="seed_to_left")
+                .edge("seed", "right", name="seed_to_right")
+                .edge("left", "left_child", name="left_to_child")
+                .edge("right", "right_child", name="right_to_child")
+                .build()
+            )
+
+            run_task = asyncio.create_task(graph.run())
+            await asyncio.wait_for(left_started.wait(), timeout=1)
+            await asyncio.wait_for(right_started.wait(), timeout=1)
+            await asyncio.sleep(0)
+
+            self.assertFalse(right_finished.is_set())
+            self.assertEqual(child_invocations, [])
+
+            right_release.set()
+            result = await asyncio.wait_for(run_task, timeout=1)
+            payload = json.loads(json.dumps(result.state))
+
+            self.assertEqual(result.status, GraphRunStatus.CANCELLED)
+            self.assertTrue(right_finished.is_set())
+            self.assertEqual(child_invocations, [])
+            self.assertEqual([message.text() for message in result.output], ["right"])
+            self.assertEqual(payload["schema"], GRAPH_STATE_SCHEMA)
+            self.assertEqual(payload["status"], "cancelled")
+            self.assertEqual(
+                payload["pending_completed_nodes"],
+                ["left", "right"],
+            )
+            self.assertEqual(
+                payload["node_states"]["left"]["completed"]["output"]["blocks"],
+                [{"kind": "text", "text": "left"}],
+            )
+            self.assertEqual(
+                payload["node_states"]["right"]["completed"]["output"]["blocks"],
+                [{"kind": "text", "text": "right"}],
+            )
+            self.assertNotIn("completed", payload["node_states"]["left_child"])
+            self.assertEqual(
+                payload["node_states"]["left_child"]["finished_dependency"],
+                0,
+            )
+            self.assertEqual(
+                payload["node_states"]["right_child"]["finished_dependency"],
+                0,
+            )
+
+        asyncio.run(scenario())
+
+    def test_graph_run_cancels_sibling_tasks_when_node_fails(self):
+        async def scenario():
+            left_started = asyncio.Event()
+            right_started = asyncio.Event()
+            right_cancelled = asyncio.Event()
+            events = []
+            graph = (
+                GraphBuilder("failed_sibling_cleanup")
+                .node(_seed_node())
+                .node(
+                    _FailingAfterPeerStartsNode(
+                        "left",
+                        left_started,
+                        right_started,
+                    )
+                )
+                .node(
+                    _CancellableBlockingTestNode(
+                        "right",
+                        right_started,
+                        right_cancelled,
+                    )
+                )
+                .start("seed")
+                .edge("seed", "left", name="seed_to_left")
+                .edge("seed", "right", name="seed_to_right")
+                .build()
+            )
+
+            run_task = asyncio.create_task(graph.run(event_sink=events.append))
+            await asyncio.wait_for(left_started.wait(), timeout=1)
+            await asyncio.wait_for(right_started.wait(), timeout=1)
+
+            with self.assertRaisesRegex(RuntimeError, "left failed"):
+                await asyncio.wait_for(run_task, timeout=1)
+
+            self.assertTrue(right_cancelled.is_set())
+            self.assertEqual(graph.status, GraphRunStatus.FAILED)
+            self.assertEqual(graph.pending_completed_nodes, [])
+            self.assertIsNone(graph.node_states["right"].completed)
+            self.assertEqual(events[-1].name, RuntimeEventName.GRAPH_FAILED)
+            self.assertEqual(events[-1].payload["graph"], "failed_sibling_cleanup")
+            self.assertEqual(events[-1].payload["state"]["status"], "failed")
+            self.assertEqual(events[-1].payload["error"]["type"], "RuntimeError")
+            self.assertEqual(events[-1].payload["error"]["message"], "left failed")
+
+        asyncio.run(scenario())
+
+    def test_graph_resume_continues_from_cancelled_state(self):
+        async def scenario():
+            left_started = asyncio.Event()
+            right_started = asyncio.Event()
+            right_release = asyncio.Event()
+            original_child_invocations = []
+
+            graph = (
+                GraphBuilder("resume_state")
+                .node(_seed_node())
+                .node(_CancellingTestNode(left_started))
+                .node(_BlockingTestNode(right_started, right_release))
+                .node(_RecordingTestNode("left_child", original_child_invocations))
+                .node(_RecordingTestNode("right_child", original_child_invocations))
+                .start("seed")
+                .edge("seed", "left", name="seed_to_left")
+                .edge("seed", "right", name="seed_to_right")
+                .edge("left", "left_child", name="left_to_child")
+                .edge("right", "right_child", name="right_to_child")
+                .build()
+            )
+
+            run_task = asyncio.create_task(graph.run())
+            await asyncio.wait_for(left_started.wait(), timeout=1)
+            await asyncio.wait_for(right_started.wait(), timeout=1)
+            right_release.set()
+            cancelled = await asyncio.wait_for(run_task, timeout=1)
+            state = json.loads(json.dumps(cancelled.state))
+
+            self.assertEqual(original_child_invocations, [])
+            resumed_invocations = []
+
+            def restored_node(name):
+                return _RecordingTestNode(name, resumed_invocations)
+
+            restored_for_run = (
+                GraphBuilder()
+                .state(state)
+                .node(restored_node("seed"))
+                .node(restored_node("left"))
+                .node(restored_node("right"))
+                .node(restored_node("left_child"))
+                .node(restored_node("right_child"))
+                .edge("seed", "left", name="seed_to_left")
+                .edge("seed", "right", name="seed_to_right")
+                .edge("left", "left_child", name="left_to_child")
+                .edge("right", "right_child", name="right_to_child")
+                .build()
+            )
+            with self.assertRaisesRegex(RuntimeError, "use resume"):
+                await restored_for_run.run()
+
+            restored = (
+                GraphBuilder()
+                .state(state)
+                .node(restored_node("seed"))
+                .node(restored_node("left"))
+                .node(restored_node("right"))
+                .node(restored_node("left_child"))
+                .node(restored_node("right_child"))
+                .edge("seed", "left", name="seed_to_left")
+                .edge("seed", "right", name="seed_to_right")
+                .edge("left", "left_child", name="left_to_child")
+                .edge("right", "right_child", name="right_to_child")
+                .build()
+            )
+
+            result = await restored.resume()
+            payload = json.loads(json.dumps(result.state))
+
+            self.assertEqual(result.status, GraphRunStatus.COMPLETED)
+            self.assertEqual(
+                set(resumed_invocations),
+                {"left_child", "right_child"},
+            )
+            self.assertNotIn("seed", resumed_invocations)
+            self.assertNotIn("left", resumed_invocations)
+            self.assertNotIn("right", resumed_invocations)
+            self.assertIn(result.output[0].text(), {"left_child", "right_child"})
+            self.assertEqual(payload["status"], "completed")
+            self.assertEqual(payload["pending_completed_nodes"], [])
+            self.assertEqual(
+                payload["node_states"]["left_child"]["finished_dependency"],
+                1,
+            )
+            self.assertEqual(
+                payload["node_states"]["right_child"]["finished_dependency"],
+                1,
+            )
+            self.assertEqual(
+                payload["node_states"]["left_child"]["completed"]["output"][
+                    "blocks"
+                ],
+                [{"kind": "text", "text": "left_child"}],
+            )
+            self.assertEqual(
+                payload["node_states"]["right_child"]["completed"]["output"][
+                    "blocks"
+                ],
+                [{"kind": "text", "text": "right_child"}],
+            )
+
+        asyncio.run(scenario())
 
     def test_graph_run_emits_graph_and_node_lifecycle_events(self):
         contexts = []
@@ -495,16 +1031,17 @@ class GraphRuntimeTests(unittest.TestCase):
             [event.name for event in events],
             [
                 RuntimeEventName.GRAPH_STARTED,
+                RuntimeEventName.ACTIVATION_READY,
                 RuntimeEventName.NODE_STARTED,
                 RuntimeEventName.NODE_FINISHED,
                 RuntimeEventName.GRAPH_FINISHED,
             ],
         )
-        self.assertEqual(events[1].payload["node"], "echo")
-        self.assertEqual(events[1].payload["history"], [input_message])
-        self.assertEqual(events[2].payload["output"].text(), "start")
+        self.assertEqual(events[2].payload["node"], "echo")
+        self.assertEqual(events[2].payload["history"], [input_message])
+        self.assertEqual(events[3].payload["output"].text(), "start")
 
-    def test_graph_run_event_sink_waits_before_next_round(self):
+    def test_graph_run_event_sink_waits_before_ready_activation(self):
         async def scenario():
             first_gate = asyncio.Event()
             second_gate = asyncio.Event()
@@ -522,8 +1059,6 @@ class GraphRuntimeTests(unittest.TestCase):
                 return Message.assistant_text("target")
 
             class BlockingSink:
-                waits_for_activation_rounds = True
-
                 async def __call__(self, event):
                     if event.name != RuntimeEventName.ACTIVATION_READY:
                         return
@@ -560,75 +1095,6 @@ class GraphRuntimeTests(unittest.TestCase):
 
             self.assertTrue(target_started.is_set())
             self.assertEqual([message.text() for message in result.output], ["target"])
-
-        asyncio.run(scenario())
-
-    def test_graph_run_event_sink_steps_full_rounds(self):
-        async def scenario():
-            gate_calls = []
-            first_gate = asyncio.Event()
-            second_gate = asyncio.Event()
-            third_gate = asyncio.Event()
-            releases = [asyncio.Event(), asyncio.Event(), asyncio.Event()]
-            right_release = asyncio.Event()
-
-            def immediate(name):
-                return lambda ctx, history, upstream_outputs: Message.assistant_text(name)
-
-            class BlockingSink:
-                waits_for_activation_rounds = True
-
-                async def __call__(self, event):
-                    if event.name != RuntimeEventName.ACTIVATION_READY:
-                        return
-                    gate_calls.append(event.payload["nodes"])
-                    if len(gate_calls) == 1:
-                        first_gate.set()
-                    if len(gate_calls) == 2:
-                        second_gate.set()
-                    if len(gate_calls) == 3:
-                        third_gate.set()
-                    await releases[len(gate_calls) - 1].wait()
-
-            class BlockingRight(CallableNode):
-                async def invoke(self, ctx, history, upstream_outputs, **extra):
-                    await right_release.wait()
-                    return await super().invoke(ctx, history, upstream_outputs, **extra)
-
-            graph = (
-                GraphBuilder("gated_rounds")
-                .node(CallableNode("seed", immediate("seed")))
-                .node(CallableNode("left", immediate("left")))
-                .node(BlockingRight("right", immediate("right")))
-                .node(CallableNode("left_child", immediate("left_child")))
-                .node(CallableNode("right_child", immediate("right_child")))
-                .start("seed")
-                .edge("seed", "left", name="seed_to_left")
-                .edge("seed", "right", name="seed_to_right")
-                .edge("left", "left_child", name="left_to_child")
-                .edge("right", "right_child", name="right_to_child")
-                .build()
-            )
-
-            run_task = asyncio.create_task(graph.run(event_sink=BlockingSink()))
-            await asyncio.wait_for(first_gate.wait(), timeout=1)
-            self.assertEqual(gate_calls[0], ["seed"])
-
-            releases[0].set()
-            await asyncio.wait_for(second_gate.wait(), timeout=1)
-            self.assertEqual(set(gate_calls[1]), {"left", "right"})
-
-            releases[1].set()
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-            self.assertEqual(len(gate_calls), 2)
-            right_release.set()
-            await asyncio.wait_for(third_gate.wait(), timeout=1)
-            self.assertEqual(set(gate_calls[2]), {"left_child", "right_child"})
-
-            releases[2].set()
-            result = await asyncio.wait_for(run_task, timeout=1)
-            self.assertEqual(len(result.output), 1)
 
         asyncio.run(scenario())
 
@@ -729,7 +1195,7 @@ class GraphRuntimeTests(unittest.TestCase):
         self.assertIs(predicate_edges[0], graph.node_states["source"].out_edges[0])
         self.assertIs(predicate_targets[0], graph.nodes["target"])
         self.assertEqual(graph.node_states["target"].finished_dependency, 0)
-        self.assertEqual(graph.node_states["target"].dependency_outputs, {})
+        self.assertEqual(graph.node_states["target"].dependency_results, {})
 
     def test_edge_predicate_allows_target_activation(self):
         target_inputs = []
@@ -893,12 +1359,12 @@ class GraphRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(prepare_downstream_history_calls, ["first", "second"])
         self.assertEqual(graph.node_states["target"].finished_dependency, 1)
-        self.assertEqual(
-            graph.node_states["target"].dependency_outputs["source_to_target"].text(),
-            "second",
-        )
+        target_dependency = graph.node_states["target"].dependency_results[
+            "source_to_target"
+        ]
+        self.assertEqual(target_dependency.output.text(), "second")
 
-    def test_dependency_output_does_not_merge_completed_history(self):
+    def test_upstream_output_does_not_merge_completed_history(self):
         def source(ctx, history, upstream_outputs):
             return Message.assistant_text("source")
 
@@ -906,7 +1372,7 @@ class GraphRuntimeTests(unittest.TestCase):
             return Message.assistant_text(upstream_outputs["source_to_target"].text())
 
         graph = (
-            GraphBuilder("unmerged_dependency_output")
+            GraphBuilder("unmerged_upstream_output")
             .node(CallableNode("source", source))
             .node(CallableNode("target", target))
             .start("source")
@@ -928,10 +1394,10 @@ class GraphRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual([activation.node.name for activation in activations], ["target"])
-        self.assertEqual(
-            graph.node_states["target"].dependency_outputs["source_to_target"].text(),
-            "source",
-        )
+        target_dependency = graph.node_states["target"].dependency_results[
+            "source_to_target"
+        ]
+        self.assertEqual(target_dependency.output.text(), "source")
         self.assertEqual(
             activations[0].upstream_outputs["source_to_target"].text(),
             "source",
@@ -1065,10 +1531,7 @@ class GraphRuntimeTests(unittest.TestCase):
         self.assertEqual([message.text() for message in result.output], ["second"])
         first_dependency = graph.node_states["second"].dependency_results["first_to_second"]
         self.assertIsInstance(first_dependency, CompletedNode)
-        self.assertEqual(
-            graph.node_states["second"].dependency_outputs["first_to_second"].text(),
-            "first",
-        )
+        self.assertEqual(first_dependency.output.text(), "first")
         self.assertEqual([message.text() for message in first_dependency.history], ["start"])
         self.assertEqual(
             [message.text() for message in first_dependency.downstream_history],

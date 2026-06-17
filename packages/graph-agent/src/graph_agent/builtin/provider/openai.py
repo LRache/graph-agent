@@ -7,10 +7,9 @@ from typing import TYPE_CHECKING, Any
 
 from openai import AsyncOpenAI
 
-from graph_agent.message import Message
+from graph_agent.core.message import Message
 
 from .convert import (
-    JsonObject,
     message_from_openai_chat_completion,
     message_from_openai_response,
     messages_to_openai_chat_messages,
@@ -20,7 +19,7 @@ from .convert import (
 )
 
 if TYPE_CHECKING:
-    from graph_agent.tool import ToolSchema
+    from graph_agent.builtin.tool import ToolSchema
 
 
 class OpenAIProvider:
@@ -69,7 +68,7 @@ class OpenAIProvider:
         **response_options: Any,
     ) -> Message:
         options = response_options_to_openai_response_options(response_options)
-        request: JsonObject = {
+        request: dict[str, Any] = {
             "model": self.model,
             "input": messages_to_openai_input(messages),
             **options,
@@ -84,7 +83,7 @@ class OpenAIProvider:
         **response_options: Any,
     ) -> Message:
         options = response_options_to_openai_chat_options(response_options)
-        request: JsonObject = {
+        request: dict[str, Any] = {
             "model": self.model,
             "messages": messages_to_openai_chat_messages(messages),
             **options,

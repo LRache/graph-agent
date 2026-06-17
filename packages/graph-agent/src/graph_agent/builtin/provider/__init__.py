@@ -1,4 +1,4 @@
-"""LLM provider adapters."""
+"""Built-in LLM provider adapters."""
 
 from .base import LLMProvider
 from .factory import LLMNodeFactory

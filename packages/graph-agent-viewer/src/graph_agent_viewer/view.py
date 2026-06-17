@@ -11,8 +11,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from graph_agent.graph import Graph, GraphRunResult
-from graph_agent.message import (
+from graph_agent.core import Graph, GraphRunResult
+from graph_agent.core.message import (
     FileBlock,
     Message,
     ReasoningBlock,
@@ -24,7 +24,6 @@ from graph_agent.runtime import RuntimeEvent, RuntimeEventName
 
 
 JsonValue = Any
-JsonObject = dict[str, Any]
 _STATIC_CONTENT_TYPES = {
     "app.js": "application/javascript",
     "index.html": "text/html",
@@ -82,7 +81,7 @@ def _message_text(message: Message) -> str:
     return "\n".join(text for text in (_block_text(block) for block in message.blocks) if text)
 
 
-def _message_to_dict(message: Message) -> JsonObject:
+def _message_to_dict(message: Message) -> dict[str, Any]:
     return {
         "role": message.role.value,
         "text": _message_text(message),
@@ -92,7 +91,7 @@ def _message_to_dict(message: Message) -> JsonObject:
     }
 
 
-def _block_to_dict(block: Any) -> JsonObject:
+def _block_to_dict(block: Any) -> dict[str, Any]:
     if isinstance(block, TextBlock):
         return {"kind": block.kind.value, "text": block.text_value}
     if isinstance(block, ReasoningBlock):
@@ -137,7 +136,7 @@ def _payload_value_to_dict(value: Any) -> JsonValue:
     return _jsonable(value)
 
 
-def runtime_event_to_dict(event: RuntimeEvent) -> JsonObject:
+def runtime_event_to_dict(event: RuntimeEvent) -> dict[str, Any]:
     return {
         "name": event.name.value,
         "payload": {
@@ -147,7 +146,7 @@ def runtime_event_to_dict(event: RuntimeEvent) -> JsonObject:
     }
 
 
-def graph_to_view_data(graph: Graph) -> JsonObject:
+def graph_to_view_data(graph: Graph) -> dict[str, Any]:
     node_names = set(graph.nodes)
     for edge in graph.edges:
         node_names.add(edge.source)
@@ -155,7 +154,7 @@ def graph_to_view_data(graph: Graph) -> JsonObject:
     if graph.start_node is not None:
         node_names.add(graph.start_node)
 
-    nodes: list[JsonObject] = []
+    nodes: list[dict[str, Any]] = []
     for node_name in sorted(node_names):
         node = graph.nodes.get(node_name)
         nodes.append(
@@ -191,14 +190,14 @@ def graph_to_view_data(graph: Graph) -> JsonObject:
 class _ViewState:
     def __init__(self, graph: Graph) -> None:
         self.graph_data = graph_to_view_data(graph)
-        self.events: list[JsonObject] = []
-        self.clients: list[asyncio.Queue[JsonObject | None]] = []
+        self.events: list[dict[str, Any]] = []
+        self.clients: list[asyncio.Queue[dict[str, Any] | None]] = []
         self.loop = asyncio.get_running_loop()
 
     def publish(self, event: RuntimeEvent) -> None:
         self.publish_data(runtime_event_to_dict(event))
 
-    def publish_data(self, event_data: JsonObject) -> None:
+    def publish_data(self, event_data: dict[str, Any]) -> None:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -208,18 +207,20 @@ class _ViewState:
             return
         self.loop.call_soon_threadsafe(self._publish_data, event_data)
 
-    def _publish_data(self, event_data: JsonObject) -> None:
+    def _publish_data(self, event_data: dict[str, Any]) -> None:
         self.events.append(event_data)
         for client in list(self.clients):
             client.put_nowait(event_data)
 
-    def register(self) -> tuple[list[JsonObject], asyncio.Queue[JsonObject | None]]:
-        client: asyncio.Queue[JsonObject | None] = asyncio.Queue()
+    def register(
+        self,
+    ) -> tuple[list[dict[str, Any]], asyncio.Queue[dict[str, Any] | None]]:
+        client: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         existing = list(self.events)
         self.clients.append(client)
         return existing, client
 
-    def unregister(self, client: asyncio.Queue[JsonObject | None]) -> None:
+    def unregister(self, client: asyncio.Queue[dict[str, Any] | None]) -> None:
         if client in self.clients:
             self.clients.remove(client)
 
@@ -231,21 +232,18 @@ class _ViewState:
 
 
 class _StepController:
-    handles_activation_ready = True
-    waits_for_activation_rounds = True
-
     def __init__(self, state: _ViewState) -> None:
         self._state = state
         self._future: asyncio.Future[None] | None = None
         self._step = 0
-        self._current: JsonObject | None = None
+        self._current: dict[str, Any] | None = None
 
     @property
     def waiting(self) -> bool:
         return self._future is not None and not self._future.done()
 
-    def status(self) -> JsonObject:
-        status: JsonObject = {
+    def status(self) -> dict[str, Any]:
+        status: dict[str, Any] = {
             "enabled": True,
             "waiting": self.waiting,
             "step": self._step,
@@ -305,7 +303,7 @@ class _StepController:
         self.release()
 
 
-async def _write_sse(response: Any, event_data: JsonObject) -> None:
+async def _write_sse(response: Any, event_data: dict[str, Any]) -> None:
     body = json.dumps(event_data)
     await response.write(f"event: graph-event\ndata: {body}\n\n".encode("utf-8"))
 

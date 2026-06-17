@@ -134,7 +134,10 @@ class OpenAIResponsesProviderTests(unittest.TestCase):
             },
         )
 
-        with self.assertLogs("graph_agent.provider.convert", level="WARNING") as logs:
+        with self.assertLogs(
+            "graph_agent.builtin.provider.convert",
+            level="WARNING",
+        ) as logs:
             asyncio.run(provider.generate([message]))
 
         self.assertIn("Ignoring ReasoningBlock", logs.output[0])

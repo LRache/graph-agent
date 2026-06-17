@@ -6,10 +6,10 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from .graph.edge import Edge, ToolSchemaProvider
-from .graph.node import Node, NodeKind, NodeResult, UpstreamOutputs
-from .message import Message, MessageRole, ToolCallBlock, ToolResultBlock
-from .runtime import RunContext
+from graph_agent.core.edge import Edge, ToolSchemaProvider
+from graph_agent.core.message import Message, MessageRole, ToolCallBlock, ToolResultBlock
+from graph_agent.core.node import Node, NodeKind, NodeResult, UpstreamOutputs
+from graph_agent.runtime import RunContext
 
 
 @dataclass(frozen=True)
@@ -164,15 +164,6 @@ class ToolCallNode(Node):
     def available_tool_schemas(self) -> tuple[ToolSchema, ...]:
         return self.registry.schemas()
 
-    def prepare_downstream_history(
-        self,
-        upstream_outputs: UpstreamOutputs,
-        history: list[Message],
-    ) -> list[Message]:
-        messages = list(history)
-        messages.extend(upstream_outputs.values())
-        return messages
-
     async def invoke(
         self,
         ctx: RunContext,
@@ -193,3 +184,15 @@ class ToolCallNode(Node):
 
     def kind(self) -> NodeKind:
         return NodeKind.LLM
+
+
+__all__ = [
+    "FunctionTool",
+    "Tool",
+    "ToolCallNode",
+    "ToolExecutor",
+    "ToolRegistry",
+    "ToolSchema",
+    "matches_any_tool_call_for_downstream",
+    "matches_tool_call",
+]

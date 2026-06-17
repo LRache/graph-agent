@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from graph_agent.graph import Graph
+from graph_agent.core import Graph
 
 
 def _escape_label(value: str) -> str:

@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Protocol
 
-from graph_agent.message import Message
+from graph_agent.core.message import Message
 
 if TYPE_CHECKING:
-    from graph_agent.tool import ToolSchema
+    from graph_agent.builtin.tool import ToolSchema
 
 
 SystemPrompt = str | None

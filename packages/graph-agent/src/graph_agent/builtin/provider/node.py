@@ -5,20 +5,19 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
-from graph_agent.graph import NodeKind, NodeResult, UpstreamOutputs
-from graph_agent.graph.edge import ToolSchemaProvider
-from graph_agent.message import Message
+from graph_agent.core import Node, NodeKind, NodeResult, UpstreamOutputs
+from graph_agent.core.edge import ToolSchemaProvider
+from graph_agent.core.message import Message
 from graph_agent.runtime import RunContext
 
 from .base import LLMProvider, SystemPrompt
 
 if TYPE_CHECKING:
-    from graph_agent.graph.edge import Edge
-    from graph_agent.graph.node import Node
-    from graph_agent.tool import ToolSchema
+    from graph_agent.builtin.tool import ToolSchema
+    from graph_agent.core.edge import Edge
 
 
-class LLMNode:
+class LLMNode(Node):
     """Graph node wrapper that invokes an LLMProvider."""
 
     def __init__(
@@ -40,13 +39,6 @@ class LLMNode:
             self.system_messages = (Message.system_text(system_prompt),)
         else:
             raise TypeError("system_prompt must be a str")
-
-    def prepare_downstream_history(
-        self,
-        upstream_outputs: UpstreamOutputs,
-        history: list[Message],
-    ) -> list[Message]:
-        return [*history, *upstream_outputs.values()]
 
     def init_from_edges(
         self,

@@ -33,10 +33,7 @@ class CallableNode(Node):
         if self._prepare_downstream_history is not None:
             return self._prepare_downstream_history(upstream_outputs, history)
 
-        messages = list(history)
-        for output in upstream_outputs.values():
-            messages.append(output)
-        return messages
+        return super().prepare_downstream_history(upstream_outputs, history)
 
     def kind(self) -> NodeKind:
         return self._kind

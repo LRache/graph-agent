@@ -183,7 +183,7 @@ class GraphViewTests(unittest.TestCase):
 
         self.assertEqual([message.text() for message in result.output], ["a"])
 
-    def test_step_controller_releases_one_activation_round_at_a_time(self) -> None:
+    def test_step_controller_releases_one_activation_step_at_a_time(self) -> None:
         async def scenario() -> None:
             graph = (
                 GraphBuilder("stepper")

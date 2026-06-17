@@ -9,7 +9,7 @@ from typing import Any
 
 from openai.types.responses import Response
 
-from graph_agent.message import (
+from graph_agent.core.message import (
     ContentBlock,
     ContentBlockKind,
     Message,
@@ -19,7 +19,6 @@ from graph_agent.message import (
 )
 
 
-JsonObject = dict[str, Any]
 OpenAIInputItem = dict[str, Any]
 OpenAIChatMessage = dict[str, Any]
 logger = logging.getLogger(__name__)
@@ -43,7 +42,7 @@ def messages_to_openai_chat_messages(
 
 def response_options_to_openai_response_options(
     response_options: Mapping[str, Any],
-) -> JsonObject:
+) -> dict[str, Any]:
     options = dict(response_options)
     if "tools" in options:
         options["tools"] = tools_to_openai_response_tools(options["tools"])
@@ -52,7 +51,7 @@ def response_options_to_openai_response_options(
 
 def response_options_to_openai_chat_options(
     response_options: Mapping[str, Any],
-) -> JsonObject:
+) -> dict[str, Any]:
     options = dict(response_options)
     if "tools" in options:
         options["tools"] = tools_to_openai_chat_tools(options["tools"])
@@ -241,7 +240,7 @@ def message_from_openai_chat_completion(
     )
 
 
-def openai_extra(*, reasoning_items: list[OpenAIInputItem]) -> JsonObject:
+def openai_extra(*, reasoning_items: list[OpenAIInputItem]) -> dict[str, Any]:
     if not reasoning_items:
         return {}
     return {"openai": {"reasoning_items": reasoning_items}}
@@ -320,11 +319,11 @@ def tool_result_output(result: ToolResultBlock) -> str:
     return json.dumps({"error": result.content or "tool failed"})
 
 
-def tools_to_openai_response_tools(tools: Any) -> list[JsonObject]:
+def tools_to_openai_response_tools(tools: Any) -> list[dict[str, Any]]:
     return [tool_to_openai_response_tool(tool) for tool in tool_items(tools)]
 
 
-def tools_to_openai_chat_tools(tools: Any) -> list[JsonObject]:
+def tools_to_openai_chat_tools(tools: Any) -> list[dict[str, Any]]:
     return [tool_to_openai_chat_tool(tool) for tool in tool_items(tools)]
 
 
@@ -342,7 +341,7 @@ def tool_items(tools: Any) -> list[Any]:
         return [tools]
 
 
-def tool_to_openai_response_tool(tool: Any) -> JsonObject:
+def tool_to_openai_response_tool(tool: Any) -> dict[str, Any]:
     if isinstance(tool, Mapping):
         tool_data = {str(key): plain_data(value) for key, value in tool.items()}
         if "type" in tool_data:
@@ -358,7 +357,7 @@ def tool_to_openai_response_tool(tool: Any) -> JsonObject:
     )
 
 
-def tool_to_openai_chat_tool(tool: Any) -> JsonObject:
+def tool_to_openai_chat_tool(tool: Any) -> dict[str, Any]:
     response_tool = tool_to_openai_response_tool(tool)
     if response_tool.get("type") != "function":
         return response_tool
@@ -376,7 +375,7 @@ def tool_to_openai_chat_tool(tool: Any) -> JsonObject:
     return {"type": "function", "function": function}
 
 
-def openai_function_tool_from_schema_data(schema: Mapping[str, Any]) -> JsonObject:
+def openai_function_tool_from_schema_data(schema: Mapping[str, Any]) -> dict[str, Any]:
     tool = {
         "type": "function",
         "name": schema["name"],
@@ -470,7 +469,7 @@ def function_call_from_legacy_chat_function_call(item: Any) -> ToolCallBlock:
     )
 
 
-def parse_arguments(raw_arguments: Any) -> JsonObject:
+def parse_arguments(raw_arguments: Any) -> dict[str, Any]:
     if not isinstance(raw_arguments, str):
         raise TypeError("OpenAI function call arguments must be a JSON object string")
     try:
@@ -490,7 +489,7 @@ def reasoning_text_from_item(item: Any) -> str:
     return "\n".join(parts)
 
 
-def response_meta(response: Response, *, model: str | None = None) -> JsonObject:
+def response_meta(response: Response, *, model: str | None = None) -> dict[str, Any]:
     return {
         "provider": "openai",
         "id": response.id,
@@ -505,7 +504,7 @@ def chat_completion_response_meta(
     choice: Any,
     *,
     model: str | None = None,
-) -> JsonObject:
+) -> dict[str, Any]:
     return {
         "provider": "openai",
         "api": "chat_completions",
